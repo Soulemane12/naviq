@@ -12,6 +12,7 @@
 // does its sign say?". Plain code decides: verified / back on route / wrong turn / can't verify.
 
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { z } from "zod";
@@ -644,7 +645,12 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   // ---------- indoor dead reckoning: real steps from the phone's motion sensor move the dot along the plan ----------
   // Between recognised places (room plaques, signs) the dot walks along the hallway the way they face, snapped
   // to the plan's corridors. Each new confirmed place snaps it back and teaches the stride (plan px per step).
-  const stride = { px: 7, n: 0 }; // prior ≈ 0.7 m step at ≈10 px/m on City Tech's plan; learned from walks
+  // Stride in plan px per step. Measured by the wearer: 61 steps from A103's door to the turn at the elevators
+  // (428 plan px along the hallway) = 7.0 px/step. Refined by later walks, saved across restarts.
+  const strideFile = path.join(path.dirname(routesFile), "stride.json");
+  const stride = { px: 7.0, n: 1 };
+  try { Object.assign(stride, JSON.parse(fsSync.readFileSync(strideFile, "utf8"))); } catch {}
+  const saveStride = () => fs.writeFile(strideFile, JSON.stringify(stride) + "\n").catch(() => {});
   function trueFacingNow() {
     if (phoneFresh() && !(heading && Date.now() - heading.ts < 4000)) return phone.deg;
     if (heading && Date.now() - heading.ts < 4000) return norm360(heading.deg + indoorOffset());
@@ -661,6 +667,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     }
     const f = trueFacingNow();
     R.est.steps += n;
+    if (Math.floor(R.est.steps / 10) !== Math.floor((R.est.steps - n) / 10)) console.log(`[steps] ${R.est.steps} steps since ${R.est.anchor}`);
     if (f == null) return { ok: true, noHeading: true };
     let px = n * stride.px, guard = 0;
     const E = R.est;
@@ -702,6 +709,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     stride.px = stride.n === 0 ? px : stride.px * 0.6 + px * 0.4;
     stride.n += 1;
     console.log(`[steps] ${steps} steps ${fromId}→${toId} (${Math.round(d)} px) → stride ${stride.px.toFixed(1)} px (n=${stride.n})`);
+    saveStride();
   }
 
   // "I'm facing the right way": the wearer confirms they face along the route right now. That's ground truth:
