@@ -757,7 +757,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       return finish(emit("arrived", statusText, { speak: spoken, navExtra: { phase: "arrived", target: t.label, seen: seenOut } }));
     };
     // Close to it: keep looking and keep telling them where it is ("Bathrooms on your right"), repeated every
-    // few seconds and following their head, until they stop the trip (or 90 s after they last saw it).
+    // few seconds and following their head, until they stop the trip (or 5 min after they last saw it).
     const nearView = (detail, statusText, spoken, arrow, b) => {
       const key = `near|${detail}`;
       let say = "";
@@ -806,7 +806,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
 
     // Already close and it slipped out of view: say where it is from the compass (or repeat the last words).
     if (!view && R.near) {
-      if (Date.now() - R.near.ts > 90000) return finalArrive(R.near.detail, `Arrived: ${t.label}`, "");
+      if (Date.now() - R.near.ts > 300000) return finalArrive(R.near.detail, `Arrived: ${t.label}`, "");
       let side = null, arrow = "arrive";
       if (R.near.bearing != null && h != null) {
         const rel = indoor.turnAngle(h, R.near.bearing);
