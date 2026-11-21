@@ -426,7 +426,9 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     if (o.routing) return; // directions on the way: keep the "getting route" card
     if (o.waiting) {
       // Good fix (±30 m), or the best we've had after 15 s of waiting (then re-planned once GPS improves).
-      if (fix.acc <= 30 || (fix.acc <= 80 && Date.now() - (o.waitSince ?? 0) > 15000)) return routeOutdoor(fix, "Got your location");
+      // Indoors (a lobby) GPS can stay poor: after 30 s take whatever we have (≤150 m) rather than wait forever.
+      const waited = Date.now() - (o.waitSince ?? 0);
+      if (fix.acc <= 30 || (fix.acc <= 80 && waited > 15000) || (fix.acc <= 150 && waited > 30000)) return routeOutdoor(fix, fix.acc > 80 ? `GPS weak, ±${Math.round(fix.acc)} meters` : "Got your location");
       o.view = { arrow: "scan", instruction: "FINDING YOU", detail: `GPS ±${Math.round(fix.acc)} m, waiting for a better fix` };
       emit("gps", `Waiting for better GPS (±${Math.round(fix.acc)} m)`, { navExtra: { phase: "waiting_gps", acc: fix.acc } });
       return;
