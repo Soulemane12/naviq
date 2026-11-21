@@ -6,7 +6,7 @@
   "source": "Traced from City Tech's published floor plan, https://www.citytech.cuny.edu/theater/docs/AC_layout.pdf (page 1, rendered 1546x2000; x/y are positions on that page). Page 2, the architectural drawing of the lobby side, confirms the entrance vestibule, lobby, turnstiles, 4 elevators, escalators and info desk.",
   "orientation": {
     "planUpBearing": 92,
-    "why": "The main entrance is on Jay Street at the bottom of the plan. The building stands on the east side of Jay Street (its coordinates are ~32 m east of the street centerline), and Jay Street runs at ~2°/182° (Mapbox/OSM route geometry). So plan-up = into the building = ~92°, plan-right = ~182° (south), plan-left = ~2° (north)."
+    "why": "The main entrance is on Jay Street at the bottom of the plan. The building stands on the east side of Jay Street (its coordinates are ~32 m east of the street centerline), and Jay Street runs at ~2\u00b0/182\u00b0 (Mapbox/OSM route geometry). So plan-up = into the building = ~92\u00b0, plan-right = ~182\u00b0 (south), plan-left = ~2\u00b0 (north)."
   },
   "nodes": [
     {
@@ -122,7 +122,11 @@
       "y": 1283,
       "kind": "corridor",
       "near": "the hall to A106 & A104",
-      "into": "the corridor"
+      "into": "the corridor",
+      "sign": [
+        "A104",
+        "A106"
+      ]
     },
     {
       "id": "c_a105b",
@@ -605,5 +609,5 @@
     "height": 2000,
     "note": "Page 1 of AC_layout.pdf; node x/y are pixels in this image."
   },
-  "groundTruth": "Exit route corrected from walking it: hallway → double doors → turnstiles → exit, straight on from A105/A103."
+  "groundTruth": "Exit route corrected from walking it: hallway \u2192 double doors \u2192 turnstiles \u2192 exit, straight on from A105/A103."
 }
