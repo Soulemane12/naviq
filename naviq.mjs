@@ -447,7 +447,9 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     const toGo = Math.max(0, total - along);
     // The route usually ends on the sidewalk a few metres short of the geocoded point: arriving at the route's
     // end counts too.
-    if (off <= Math.max(15, fix.acc ?? 15) && toGo <= Math.max(8, Math.min(20, fix.acc ?? 20))) return arriveOutdoor(); // must be ON the route
+    // Route-end arrival: on the route, near its end along the path, AND actually close to the final point
+    // (Codex reproduced a false arrival 35 m beside the endpoint without the last two guards).
+    if (off <= Math.max(15, fix.acc ?? 15) && toGo <= Math.max(8, Math.min(20, fix.acc ?? 20)) && dist(fix, o.line[o.line.length - 1]) <= arriveR) return arriveOutdoor();
 
     // Next real maneuver ahead of us along the path (distance measured along the path, not straight-line).
     let k = o.steps.findIndex((st, i) => i > 0 && o.cum[st.lineIndex] > along + 2);

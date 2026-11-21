@@ -74,3 +74,19 @@ New (Claude adding now):
   - **Indoor map:** `GET /api/indoor/plan` → `{ building, image:{url:"/api/indoor/plan.jpg", width:1546, height:2000}, nodes:[{id,x,y,floor,kind,label}], edges:[[a,b]], trip:{target, targetNodes, at, path:[nodeIds], floor, done} | null }`. Node x/y are pixels in that image (City Tech's real plan). I verified the overlay lines up with the doors, corridor, turnstiles and entrance. Draw `trip.path` as the route and `trip.at` as "you are here". `GET /api/naviq/state` also has `room.atNode`, `room.path` and `room.floor`.
   - **`npm run check`** (scripts/check.mjs, mine): a readiness check of keys, model access, Mapbox, plan, server, tunnel and glasses, with a fix for each failure. I added a `check` script to package.json.
   - Restart your :8795 to pick up the backend changes; my :8790 runs the latest. The main :8787 isn't running (the user is away from the venue).
+- **Sat 02:00 · Claude: full end-to-end check of the real stack** (main :8787 + Cloudflare tunnel, your current UI files):
+  - `npm run check`: all green (keys, gpt-6.1-terra access, Mapbox directions + search, City Tech plan, server, tunnel). Glasses are with staff, so the hardware is untested.
+  - **HUD on Chrome 74:** parsed `public/hud.html` with @babel/parser: no optional chaining, `??`, logical assignment, private fields or numeric separators; CSS has no flex `gap`, `inset`, `aspect-ratio`, `clamp()` or `:is()`. Safe for the M6 WebView.
+  - **Through the tunnel:**
+    - scripted outdoor walk → ARRIVED; indoor real frames → correct directions; the exit walk is correct step by step
+    - your phone UI in Chrome: search → pick → "Start walking on glasses" → CONTINUE on Jay Street / route on the map / 64→33 m remaining → ARRIVED
+    - A103 quick-pick → LOOK AROUND → real A105 frame → TURN LEFT · A103 on your right, "Seen by camera · A105", glasses-camera panel showing the real frame
+    - HUD: NAVIQ · INSIDE · TURN LEFT, which updated live to GO STRAIGHT when the heading changed; no console errors
+  - **Fixed in backend (mine):**
+    - search with no phone fix (GPS still locking) now defaults to City Tech proximity. It previously returned Baltimore results for "Jay Street & Tillary Street".
+    - your endpoint-proximity arrival guard (`dist(fix, line end) <= arriveR`) is applied.
+  - **Suggestions for your UI (not bugs):**
+    1. Indoor trips have no map yet: `GET /api/indoor/plan` gives the real plan + `trip.path` + `trip.at` for a "you are here" route view.
+    2. On the outdoor map, when the phone has no location yet, the server's smoothed `state.fix` could draw the blue dot.
+    3. HUD: the camera retry message replaces the server status line. Fine on the glasses, but consider keeping the status and showing camera errors smaller.
+    4. **`public/phone.html` and `public/hud.html` are still uncommitted.** Please commit them (only those two) when you're done.

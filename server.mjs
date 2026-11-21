@@ -390,7 +390,10 @@ const server = http.createServer(async (req, res) => {
         const q = (url.searchParams.get("q") ?? "").trim();
         if (!q) return send(res, 400, { error: "empty search" });
         const lat = Number(url.searchParams.get("lat")), lon = Number(url.searchParams.get("lon"));
-        return send(res, 200, { results: await geoSearch(q, lat && lon ? { lat, lon } : null) });
+        // No phone fix yet (GPS still locking): search around City Tech, where NAVIQ runs, so a vague query
+        // doesn't return same-named places in other states.
+        const near = lat && lon ? { lat, lon } : { lat: 40.6955, lon: -73.9867 };
+        return send(res, 200, { results: await geoSearch(q, near) });
       }
 
       case "GET /api/tts": {
