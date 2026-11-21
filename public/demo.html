@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NAVIQ Demo</title>
+<style>
+  :root { --bg: #0b0e13; --panel: #141922; --line: #262d39; --ink: #e8edf3; --muted: #8b95a3; --accent: #4f9cff; --green: #5dff8f; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
+  header { height: 56px; display: flex; align-items: center; gap: 14px; padding: 0 22px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 20px; margin: 0; letter-spacing: .02em; }
+  header .tag { color: var(--muted); }
+  header .live { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: #e5534b; box-shadow: 0 0 0 0 rgba(229,83,75,.6); animation: pulse 1.6s infinite; }
+  @keyframes pulse { to { box-shadow: 0 0 0 10px rgba(229,83,75,0); } }
+  main { height: calc(100% - 56px); display: grid; grid-template-columns: auto 1fr; gap: 18px; padding: 16px 22px; }
+  .label { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 8px; display: flex; justify-content: space-between; gap: 12px; }
+  .col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  /* phone: a 390×844 page scaled to the column height */
+  .phone { position: relative; border-radius: 38px; border: 10px solid #1d222b; background: #000; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.5); flex: 1; }
+  .phone iframe { position: absolute; top: 0; left: 0; width: 390px; height: 844px; border: 0; transform-origin: 0 0; }
+  .right { display: grid; grid-template-rows: 1fr 1fr; gap: 16px; min-height: 0; }
+  .pane { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 12px; display: flex; flex-direction: column; min-height: 0; }
+  .screen { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  .hudbox { position: relative; aspect-ratio: 4 / 3; height: 100%; max-width: 100%; background: #000; border-radius: 10px; overflow: hidden; outline: 2px solid #1f3b29; }
+  .hudbox iframe { position: absolute; top: 0; left: 0; width: 640px; height: 480px; border: 0; transform-origin: 0 0; pointer-events: none; }
+  .cam { display: grid; grid-template-columns: auto 260px; gap: 14px; flex: 1; min-height: 0; }
+  .cambox { position: relative; aspect-ratio: 4 / 3; height: 100%; max-width: 100%; background: #000; border-radius: 10px; overflow: hidden; }
+  .cambox img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cambox .age { position: absolute; left: 10px; bottom: 10px; background: rgba(0,0,0,.6); padding: 2px 8px; border-radius: 6px; font-size: 12px; color: #fff; }
+  .reads { overflow: auto; }
+  .reads h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 6px; }
+  .chip { display: inline-block; margin: 0 6px 6px 0; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 13px; }
+  .chip.room { border-color: var(--accent); }
+  .chip.place { border-color: #3fb950; }
+  .say { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0f2a1a; color: var(--green); font-family: ui-monospace, Menlo, monospace; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>NAVIQ</h1><span class="tag">phone plans · glasses guide</span>
+  <span class="live"><span class="dot"></span> live from the phone and the M6 glasses</span>
+</header>
+<main>
+  <section class="col" id="phoneCol">
+    <p class="label"><span>Phone</span><span>what the wearer taps</span></p>
+    <div class="phone" id="phone"><iframe id="phoneFrame" title="Phone screen"></iframe></div>
+  </section>
+  <section class="right">
+    <div class="pane">
+      <p class="label"><span>Glasses HUD</span><span>what the wearer sees</span></p>
+      <div class="screen"><div class="hudbox" id="hudbox"><iframe id="hudFrame" title="Glasses HUD"></iframe></div></div>
+    </div>
+    <div class="pane">
+      <p class="label"><span>Glasses camera</span><span>what NAVIQ reads</span></p>
+      <div class="cam">
+        <div class="cambox" id="cambox"><img id="cam" alt="Glasses camera"><span class="age" id="age">waiting for camera…</span></div>
+        <div class="reads">
+          <h3>Seen in this frame</h3>
+          <div id="chips"><span class="chip">—</span></div>
+          <div class="say" id="say" hidden></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const tok = new URLSearchParams(location.search).get("t");
+const q = (path) => path + (tok ? (path.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(tok) : "");
+// Read-only phone mirror (never sends the laptop's GPS/compass), and the HUD's laptop preview (no camera, quiet).
+$("phoneFrame").src = q("/?view=1");
+$("hudFrame").src = q("/hud");
+
+function fit() {
+  const ph = $("phone"), f = $("phoneFrame");
+  const h = ph.clientHeight, w = Math.round(h * 390 / 844);
+  ph.style.width = (w + 20) + "px"; ph.style.flex = "1";
+  f.style.transform = `scale(${h / 844})`;
+  const hb = $("hudbox");
+  $("hudFrame").style.transform = `scale(${hb.clientWidth / 640})`;
+}
+addEventListener("resize", fit); setTimeout(fit, 50); setInterval(fit, 2000);
+
+// Glasses camera: newest frame + what the vision model read in it.
+let frameTs = 0;
+async function cam() {
+  try {
+    const l = await (await fetch("/api/live", { cache: "no-store" })).json();
+    if (l.frameTs && l.frameTs !== frameTs) { frameTs = l.frameTs; $("cam").src = "/api/live/frame?ts=" + frameTs; }
+    $("age").textContent = l.frameTs ? `${Math.max(0, Math.round((Date.now() - l.frameTs) / 1000))} s ago` : "waiting for camera…";
+    const r = l.read || {}, chips = $("chips");
+    chips.innerHTML = "";
+    const add = (t, c) => { const s = document.createElement("span"); s.className = "chip " + c; s.textContent = t; chips.appendChild(s); };
+    for (const x of r.rooms || []) add(`${x.label} · ${x.position}${x.close ? " · close" : ""}`, "room");
+    for (const x of r.places || []) add(`${x.kind.replace("_", " ")} · ${x.position}${x.close ? " · close" : ""}`, "place");
+    for (const x of r.signs || []) add(`sign “${x.text.replace(/\s+/g, " ")}”`, "");
+    if (!chips.children.length) add(r.rooms ? "nothing recognised" : "—", "");
+    const v = l.view;
+    $("say").hidden = !v; if (v) $("say").textContent = `${v.instruction}${v.detail ? " · " + v.detail : ""}`;
+  } catch (e) { $("age").textContent = "can't reach NAVIQ"; }
+  setTimeout(cam, 700);
+}
+cam();
+</script>
+</body>
+</html>

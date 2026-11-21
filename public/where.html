@@ -154,6 +154,8 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let manualTab = 0, lastGps = null; // declared first: used by handlers that can run during page setup
+// ?view=1: a read-only mirror (the laptop demo screen). Never sends this device's GPS, compass or steps.
+const VIEW_ONLY = new URLSearchParams(location.search).get("view") === "1";
 const NS = "http://www.w3.org/2000/svg";
 let plan = null, built = false, byId = {};
 const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
@@ -435,7 +437,7 @@ setInterval(() => { if (pendingSteps) { const n = pendingSteps; pendingSteps = 0
 // GPS for outdoor trips started from this page (same format as the main phone page).
 let gpsWatch = null;
 function startGps() {
-  if (gpsWatch != null || !navigator.geolocation) return;
+  if (VIEW_ONLY || gpsWatch != null || !navigator.geolocation) return;
   gpsWatch = navigator.geolocation.watchPosition((p) => {
     const c = p.coords; lastGps = { lat: c.latitude, lon: c.longitude, acc: c.accuracy };
     post("/api/naviq/loc", { lat: c.latitude, lon: c.longitude, acc: c.accuracy, speed: c.speed == null ? undefined : c.speed, sampleAt: p.timestamp }).catch(() => {});
@@ -443,7 +445,7 @@ function startGps() {
 }
 let sensorsAsked = false;
 async function ensureSensors() {
-  if (sensorsAsked) return; sensorsAsked = true;
+  if (sensorsAsked || VIEW_ONLY) return; sensorsAsked = true;
   try {
     if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
       const r = await DeviceOrientationEvent.requestPermission();
@@ -469,6 +471,7 @@ function showTab(which, manual) {
 }
 $("tabIn").onclick = () => { ensureSensors(); showTab("in", true); };
 $("tabOut").onclick = () => { ensureSensors(); showTab("out", true); };
+if (VIEW_ONLY) $("sens").textContent = "Live view of the phone";
 startGps(); // GPS doesn't need a tap; compass/steps do (iPhone asks on the first button you press)
 poll();
 </script>
