@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NAVIQ HUD</title>
+<style>
+  /* 640x480 = M6 display. Black is see-through on the waveguide, so keep it black.
+     Written for the glasses' Chrome 74 WebView: no flex gap, no inset, no optional chaining. */
+  :root { --ink: #3cff6e; --dim: #1f8a3c; --warn: #3cff6e; }
+  body.white { --ink: #f2f2f2; --dim: #8a8a8a; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: ui-monospace, "SF Mono", Menlo, "Droid Sans Mono", monospace; cursor: pointer; }
+  #stage { width: 640px; height: 480px; position: relative; box-sizing: border-box; flex: none; color: var(--ink); transform-origin: center; outline: 1px dashed #222; }
+  body.fs #stage { outline: none; }
+
+  /* plain card */
+  #card { position: absolute; top: 0; left: 0; right: 0; bottom: 0; padding: 48px 40px; }
+  #title { font-size: 52px; font-weight: 700; line-height: 1.1; margin: 0 0 28px; }
+  .line { font-size: 36px; line-height: 1.35; }
+  #title, .line { max-width: 560px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* navigation layout */
+  #nav { display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; padding: 30px 36px; }
+  #nav .top { display: flex; justify-content: space-between; font-size: 22px; letter-spacing: 3px; color: var(--dim); }
+  #nav .top.flash { color: var(--ink); animation: flash 0.5s ease-in-out 4; }
+  @keyframes flash { 50% { opacity: 0.15; } }
+  #nav .row { display: flex; align-items: center; margin-top: 22px; height: 150px; }
+  #nav svg { width: 140px; height: 140px; flex: none; }
+  #nav .instr { font-size: 48px; font-weight: 700; line-height: 1.08; margin-left: 26px; }
+  #nav .detail { font-size: 29px; line-height: 1.25; margin-top: 18px; max-height: 2.5em; overflow: hidden; }
+  #nav .status { position: absolute; left: 36px; right: 36px; bottom: 66px; font-size: 27px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #nav .status.warn { font-weight: 700; }
+  #nav .status.pending { animation: flash 1s ease-in-out infinite; }
+  #nav .dest { position: absolute; left: 36px; right: 36px; bottom: 30px; font-size: 20px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.navon #card { display: none; }
+  body.navon #nav { display: block; }
+
+  #status { position: absolute; right: 14px; bottom: 10px; width: 8px; height: 8px; border-radius: 50%; background: #600; }
+  #status.on { background: var(--dim); }
+  #meta { position: absolute; left: 40px; bottom: 10px; font-size: 14px; color: var(--dim); }
+  body.navon #meta { display: none; }
+  .enter { animation: enter .25s ease-out; }
+  @keyframes enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  #help { position: fixed; left: 12px; top: 10px; font: 12px system-ui, sans-serif; color: #555; }
+  body.fs #help { display: none; }
+  video, canvas { display: none; }
+</style>
+</head>
+<body>
+<div id="help">click: fullscreen · c: green/white · space: snap (camera) · ←/→: back/next step</div>
+<div id="stage">
+  <div id="card">
+    <div id="title">NAVIQ</div>
+    <div id="lines"></div>
+  </div>
+  <div id="nav">
+    <div class="top" id="ntop"><span id="nmode">NAVIQ</span><span id="nstep"></span></div>
+    <div class="row">
+      <svg id="narrow" viewBox="0 0 100 100"></svg>
+      <div class="instr" id="ninstr"></div>
+    </div>
+    <div class="detail" id="ndetail"></div>
+    <div class="status" id="nstatus"></div>
+    <div class="dest" id="ndest"></div>
+  </div>
+  <div id="meta"></div>
+  <div id="status" title="live connection"></div>
+</div>
+<video id="cam" playsinline muted></video>
+<canvas id="snap"></canvas>
+<script>
+  var params = new URLSearchParams(location.search);
+  var onGlasses = params.get("glasses") === "1";
+  if (onGlasses) document.body.classList.add("fs");
+  var $ = function (id) { return document.getElementById(id); };
+  var stage = $("stage"), cardEl = $("card"), navEl = $("nav");
+  var lastTs = 0, lastSpoken = "", current = null;
+
+  function fit() { var s = Math.min(innerWidth / 640, innerHeight / 480); stage.style.transform = "scale(" + s + ")"; }
+  addEventListener("resize", fit); fit();
+
+  // ---- arrows (inline SVG; Unicode arrows are unreliable in the glasses' fonts) ----
+  var ARROW = '<path d="M50 6 L90 48 L63 48 L63 94 L37 94 L37 48 L10 48 Z" fill="currentColor"/>';
+  var SHAPES = {
+    straight: ARROW, up: ARROW,
+    right: '<g transform="rotate(90 50 50)">' + ARROW + '</g>',
+    left: '<g transform="rotate(-90 50 50)">' + ARROW + '</g>',
+    down: '<g transform="rotate(180 50 50)">' + ARROW + '</g>',
+    back: '<path d="M30 92 L30 42 A22 22 0 0 1 74 42 L74 60" fill="none" stroke="currentColor" stroke-width="13"/><path d="M74 88 L56 58 L92 58 Z" fill="currentColor"/>',
+    arrive: '<circle cx="50" cy="50" r="42" fill="none" stroke="currentColor" stroke-width="9"/><path d="M28 52 L44 68 L74 34" fill="none" stroke="currentColor" stroke-width="11"/>',
+    scan: '<path d="M8 30 V8 H30 M70 8 H92 V30 M92 70 V92 H70 M30 92 H8 V70" fill="none" stroke="currentColor" stroke-width="9"/><circle cx="50" cy="50" r="10" fill="currentColor"/>'
+  };
+
+  // Voice: native TTS if the glasses have an engine (the M6 doesn't), else server TTS through the speaker.
+  var audio = null;
+  function speak(text) {
+    if (!text || text === lastSpoken) return;
+    lastSpoken = text;
+    if (window.Glasses && window.Glasses.canSpeak && window.Glasses.canSpeak()) { window.Glasses.speak(text); return; }
+    if (!onGlasses && !window.speakOn) return; // laptop preview stays quiet until you click it
+    try {
+      if (audio) audio.pause();
+      audio = new Audio("/api/tts?text=" + encodeURIComponent(text));
+      var p = audio.play();
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) {}
+  }
+
+  var gpsNav = null, gpsRecvAt = 0;
+  function renderNav(n, card) {
+    document.body.classList.add("navon");
+    if (n.kind === "gps" && typeof n.distM === "number") {
+      if (!gpsNav || card.ts !== gpsNav.ts) gpsRecvAt = Date.now();
+      gpsNav = { ts: card.ts, distM: n.distM, speed: n.speed || 0, acc: n.acc, ahead: n.aheadBearing, arrow: n.arrow };
+    } else gpsNav = null;
+    $("nmode").textContent = "NAVIQ · " + String(n.mode || "").toUpperCase();
+    $("nstep").textContent = n.total ? n.step + "/" + n.total : "";
+    $("narrow").innerHTML = SHAPES[n.arrow] || SHAPES.straight;
+    $("ninstr").textContent = n.instruction || "";
+    $("ndetail").textContent = n.detail || "";
+    var st = $("nstatus");
+    st.textContent = n.status || "";
+    st.className = "status " + (n.kind || "");
+    $("ndest").textContent = n.dest ? "TO  " + n.dest : "";
+    var top = $("ntop");
+    top.classList.remove("flash");
+    if (n.modeChanged) { void top.offsetWidth; top.classList.add("flash"); }
+  }
+
+  function renderCard(card) {
+    document.body.classList.remove("navon");
+    $("title").textContent = card.title || "";
+    var lines = $("lines"); lines.innerHTML = "";
+    (card.lines || []).slice(0, 3).forEach(function (t) {
+      var d = document.createElement("div"); d.className = "line"; d.textContent = t; lines.appendChild(d);
+    });
+    $("meta").textContent = card.ts ? new Date(card.ts).toLocaleTimeString() : "";
+  }
+
+  // Indoor floor-plan trips: the glasses look around on their own every 8 s (a tap still works any time).
+  var autoTimer = null;
+  var autoMs = 0;
+  function autoSnap(on, ms) {
+    if (autoTimer && ms !== autoMs) { clearInterval(autoTimer); autoTimer = null; }
+    autoMs = ms;
+    if (on && onGlasses && !autoTimer) autoTimer = setInterval(function () { snap(); }, ms || 8000);
+    if ((!on || !onGlasses) && autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  }
+
+  function render(card) {
+    current = card;
+    autoSnap(Boolean(card.nav && card.nav.auto), card.nav ? card.nav.autoMs : 0);
+    if (card.nav) renderNav(card.nav, card); else renderCard(card);
+    if (card.ts !== lastTs) {
+      lastTs = card.ts;
+      var box = card.nav ? navEl : cardEl;
+      box.classList.remove("enter"); void box.offsetWidth; box.classList.add("enter");
+      if (!(card.nav && card.nav.kind === "pending")) speak(card.speak);
+    }
+  }
+
+  // Local feedback (camera errors etc.) without waiting for the server.
+  // ---- self-update: reload when the server's HUD file changes ----
+  var hudV = null;
+  setInterval(function () {
+    fetch("/api/hud-version", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
+      if (hudV == null) hudV = j.v; else if (j.v !== hudV) location.reload();
+    }).catch(function () {});
+  }, 5000);
+
+  // ---- compass: which way the wearer's head faces (glasses magnetometer via deviceorientationabsolute) ----
+  // Device -z axis (out the back of the display = where the wearer looks), projected on the ground plane.
+  var heading = null, headingAt = 0, lastSentHeading = null, lastSentAt = 0;
+  function onOrient(e) {
+    if (e.alpha == null || (e.type === "deviceorientation" && !e.absolute)) return;
+    var r = Math.PI / 180, a = e.alpha * r, b = (e.beta || 0) * r, g = (e.gamma || 0) * r;
+    var east = -Math.cos(a) * Math.sin(g) - Math.sin(a) * Math.sin(b) * Math.cos(g);
+    var north = -Math.sin(a) * Math.sin(g) + Math.cos(a) * Math.sin(b) * Math.cos(g);
+    var h = (Math.atan2(east, north) * 180 / Math.PI + 360) % 360;
+    if (heading == null) heading = h;
+    else { var d = ((h - heading + 540) % 360) - 180; heading = (heading + d * 0.25 + 360) % 360; } // smooth
+    headingAt = Date.now();
+    if (Date.now() - lastSentAt > 1000 && (lastSentHeading == null || Math.abs(((heading - lastSentHeading + 540) % 360) - 180) > 5)) {
+      lastSentAt = Date.now(); lastSentHeading = heading;
+      fetch("/api/heading", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ h: Math.round(heading) }) }).catch(function () {});
+    }
+  }
+  if ("ondeviceorientationabsolute" in window) addEventListener("deviceorientationabsolute", onOrient);
+  else addEventListener("deviceorientation", onOrient);
+
+  // ---- live loop (every 100 ms, no network): rotate the arrow to the real direction, count metres down ----
+  var ROT = '<g transform="rotate(ANG 50 50)">' + ARROW + '</g>';
+  setInterval(function () {
+    if (!gpsNav) return;
+    var compassOk = heading != null && Date.now() - headingAt < 2000 && typeof gpsNav.ahead === "number";
+    if (compassOk) {
+      var rel = ((gpsNav.ahead - heading + 540) % 360) - 180; // + = to the right
+      $("narrow").innerHTML = ROT.replace("ANG", rel.toFixed(0));
+    }
+    var est = Math.max(0, gpsNav.distM - gpsNav.speed * (Date.now() - gpsRecvAt) / 1000);
+    var shown = est >= 100 ? Math.round(est / 10) * 10 : Math.round(est);
+    var st = $("nstatus");
+    if (st.className.indexOf("pending") < 0) st.textContent = "◎ In " + shown + " m · GPS ±" + gpsNav.acc + " m" + (compassOk ? "" : " · no compass");
+  }, 100);
+
+  function setMeta(t) {
+    if (document.body.classList.contains("navon")) { $("nstatus").textContent = t; $("nstatus").className = "status"; }
+    else $("meta").textContent = t;
+  }
+
+  // Live cards: the event stream works over USB; through the Cloudflare tunnel it gets held back, so poll
+  // /api/state whenever the stream hasn't delivered anything recently.
+  var lastMsgAt = 0, lastPollTs = 0;
+  (function connect() {
+    var es = new EventSource("/api/events");
+    es.onopen = function () { $("status").classList.add("on"); };
+    es.onmessage = function (e) { lastMsgAt = Date.now(); try { var c = JSON.parse(e.data); lastPollTs = c.ts; render(c); } catch (err) {} };
+    es.onerror = function () { $("status").classList.remove("on"); };
+  })();
+  setInterval(function () {
+    if (Date.now() - lastMsgAt < 20000) return; // stream is alive (server pings every 15 s)
+    fetch("/api/state", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (c) {
+      $("status").classList.add("on");
+      if (c.ts !== lastPollTs) { lastPollTs = c.ts; render(c); }
+    }).catch(function () { $("status").classList.remove("on"); });
+  }, 500);
+
+  // ---- camera: needs a secure context (localhost via `adb reverse`, or https) ----
+  var stream = null, snapping = false, inflight = 0;
+  var MAX_INFLIGHT = 2; // two looks in flight at once on room trips
+  function dropCam() {
+    if (stream) stream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
+    stream = null;
+  }
+  function startCam() {
+    // The built-in camera app can evict us (score 0 beats ours); an evicted track ends → re-acquire.
+    if (stream) {
+      var tr = stream.getVideoTracks()[0];
+      if (tr && tr.readyState === "live") return Promise.resolve(stream);
+      dropCam();
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return Promise.reject(new Error("no camera API (need localhost/https)"));
+    return navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 960 }, audio: false }).then(function (s) {
+      stream = s; var v = $("cam"); v.srcObject = s; return v.play().then(function () { return s; });
+    });
+  }
+
+  function snap(text) {
+    if (snapping || inflight >= MAX_INFLIGHT) return;
+    snapping = true; inflight += 1;
+    if (!document.body.classList.contains("navon")) setMeta("📷 snapping…");
+    // Never hang: if the camera doesn't deliver within 10 s, drop it and let the next look retry.
+    var watchdog = setTimeout(function () { dropCam(); snapping = false; inflight = 0; setMeta("camera busy, retrying…"); }, 10000);
+    startCam().then(function () {
+      var v = $("cam"), c = $("snap");
+      if (!v.videoWidth) { dropCam(); throw new Error("no camera frame"); }
+      var s = Math.min(1, 1280 / Math.max(v.videoWidth, v.videoHeight));
+      c.width = Math.round(v.videoWidth * s); c.height = Math.round(v.videoHeight * s);
+      c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+      var dataUrl = c.toDataURL("image/jpeg", 0.85);
+      snapping = false; // frame captured: the next look can start while this one is being answered
+      if (!document.body.classList.contains("navon")) setMeta("thinking…");
+      return fetch("/api/snap", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: text || "", image: dataUrl })
+      });
+    }).then(function (r) { return r.json(); })
+      .then(function (out) { if (out && out.error) setMeta("⚠ " + out.error); })
+      .catch(function (e) { setMeta("camera: " + e.message); })
+      .then(function () { clearTimeout(watchdog); snapping = false; inflight = Math.max(0, inflight - 1); });
+  }
+
+  function step(dir) {
+    fetch("/api/naviq/step", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir: dir }) });
+  }
+
+  function repeat() { if (current) { lastSpoken = ""; speak(current.speak || (current.nav ? current.nav.instruction + ". " + current.nav.detail : "")); } }
+
+  // ---- M6 input: the Worn HUD app calls this for each temple-touchpad / ring key ----
+  // Seen so far on the M6: tap = ENTER (66). F9 (139) opens the built-in camera app, so avoid it.
+  // Unknown yet: 300, F12 (142). Watch the server log while trying gestures and map them here.
+  var KEYMAP = {
+    KEYCODE_ENTER: snap, KEYCODE_DPAD_CENTER: snap, KEYCODE_SPACE: snap,
+    KEYCODE_DPAD_RIGHT: function () { step("next"); }, KEYCODE_DPAD_DOWN: function () { step("next"); },
+    KEYCODE_DPAD_LEFT: function () { step("back"); }, KEYCODE_DPAD_UP: function () { step("back"); },
+    KEYCODE_BACK: repeat, "300": repeat, KEYCODE_F12: repeat
+  };
+  window.onGlassesKey = function (code, name) {
+    var fn = KEYMAP[name] || KEYMAP[String(code)];
+    if (fn) fn(); else setMeta("key: " + name);
+  };
+
+  // ---- laptop preview controls ----
+  addEventListener("click", function () {
+    if (onGlasses) return;
+    window.speakOn = true;
+    if (!document.fullscreenElement) { document.documentElement.requestFullscreen(); document.body.classList.add("fs"); }
+    else { document.exitFullscreen(); document.body.classList.remove("fs"); }
+  });
+  addEventListener("keydown", function (e) {
+    if (e.key === "c") document.body.classList.toggle("white");
+    if (e.key === " ") snap();
+    if (e.key === "ArrowRight") step("next");
+    if (e.key === "ArrowLeft") step("back");
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NAVIQ</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<style>
+  :root { --bg: #f6f7f5; --fg: #111; --muted: #667; --card: #fff; --line: #e2e4e0; --accent: #0a8a3a; --warn: #c2410c; --hud: #3cff6e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0c0b; --fg: #eee; --muted: #8a8f8a; --card: #161816; --line: #262a26; --accent: #3cff6e; --warn: #fb923c; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 -apple-system, system-ui, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 16px 16px 48px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin: 4px 0 6px; }
+  h1 { font-size: 26px; letter-spacing: 2px; margin: 0; } h1 span { color: var(--accent); }
+  .pills { display: flex; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 12px; flex-wrap: wrap; }
+  .pill { padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; }
+  .pill.on { border-color: var(--accent); color: var(--accent); }
+  .pill.bad { border-color: var(--warn); color: var(--warn); }
+  .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  .tabs button { flex: 1; padding: 10px 4px; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 10px; font-size: 14px; }
+  .tabs button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  label, .lbl { display: block; font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+  select, input[type=text] { width: 100%; padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg); font: inherit; }
+  .big { width: 100%; margin-top: 14px; padding: 15px; border: 0; border-radius: 12px; background: var(--accent); color: #000; font-size: 17px; font-weight: 700; }
+  .big:disabled { opacity: .45; }
+  .row { display: flex; gap: 8px; margin-top: 10px; }
+  .row > * { flex: 1; }
+  .btn { padding: 12px 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--fg); font-size: 15px; text-align: center; }
+  .btn.sel { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .file { position: relative; overflow: hidden; display: block; }
+  .file input { position: absolute; inset: 0; opacity: 0; }
+  .results { list-style: none; margin: 8px 0 0; padding: 0; }
+  .results li { padding: 10px; border: 1px solid var(--line); border-radius: 10px; margin-top: 6px; cursor: pointer; }
+  .results li.sel { border-color: var(--accent); }
+  .results small { display: block; color: var(--muted); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .chips button { padding: 6px 10px; border-radius: 99px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font-size: 13px; }
+  .hud { background: #000; color: var(--hud); font-family: ui-monospace, Menlo, monospace; border-radius: 12px; padding: 14px 16px; aspect-ratio: 4 / 3; position: relative; overflow: hidden; }
+  .hud .top { display: flex; justify-content: space-between; font-size: 11px; letter-spacing: 2px; opacity: .65; }
+  .hud .mid { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
+  .hud svg { width: 64px; height: 64px; flex: none; }
+  .hud .instr { font-size: 24px; font-weight: 700; line-height: 1.1; }
+  .hud .detail { font-size: 15px; margin-top: 10px; }
+  .hud .status { position: absolute; left: 16px; right: 16px; bottom: 34px; font-size: 14px; }
+  .hud .dest { position: absolute; left: 16px; right: 16px; bottom: 12px; font-size: 11px; opacity: .65; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hud .t { font-size: 22px; font-weight: 700; } .hud .l { font-size: 15px; }
+  #map { height: 260px; border-radius: 12px; margin-top: 12px; display: none; }
+  .note { color: var(--muted); font-size: 14px; margin: 10px 2px 0; }
+  .steps { list-style: none; margin: 6px 0 0; padding: 0; }
+  .steps li { display: flex; gap: 10px; align-items: center; padding: 6px 0; font-size: 14px; color: var(--muted); }
+  .steps li .dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line); flex: none; }
+  .steps li.done { color: var(--fg); } .steps li.done .dot { background: var(--accent); border-color: var(--accent); }
+  .steps li.cur { color: var(--fg); font-weight: 600; } .steps li.cur .dot { border-color: var(--accent); }
+  .mode { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-left: auto; }
+  .capture { border: 2px solid var(--accent); }
+  .capture .read { font-size: 22px; font-weight: 700; margin: 4px 0; }
+  .arrows { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center; }
+  .stats div { background: var(--bg); border-radius: 10px; padding: 10px 4px; }
+  .stats b { display: block; font-size: 22px; } .stats span { font-size: 12px; color: var(--muted); }
+  .tl { list-style: none; margin: 0; padding: 0; }
+  .tl li { display: grid; grid-template-columns: 54px 22px 1fr; gap: 6px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .tl li:last-child { border-bottom: 0; }
+  .tl time { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tl .sub { color: var(--muted); font-size: 12px; }
+  .tl .warn { color: var(--warn); } .tl .ok { color: var(--accent); }
+  .tl img { width: 100%; border-radius: 8px; margin-top: 6px; display: none; }
+  .tl li.open img { display: block; }
+  .empty { color: var(--muted); font-size: 14px; text-align: center; padding: 14px 0; display: block !important; }
+  #err { color: var(--warn); font-size: 14px; min-height: 1em; margin-top: 8px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>NAV<span>IQ</span></h1></header>
+  <div class="pills"><span class="pill" id="pconn">server…</span><span class="pill" id="pgps">GPS off</span></div>
+  <div class="tabs">
+    <button data-tab="go" class="on">Navigate</button>
+        <button data-tab="review">Review</button>
+    <button data-tab="ask">Ask</button>
+  </div>
+
+  <!-- NAVIGATE -->
+  <section id="tab-go">
+    <div id="plan">
+      <div class="panel">
+        <label for="room">Find a room</label>
+        <input id="room" type="text" placeholder="e.g. A103" autocapitalize="characters" autocomplete="off">
+        <div class="row"><button class="btn" id="exitbtn">🚪 Get me out of the building</button></div>
+        <p class="note">Look at any room number and the glasses take it from there: which floor, which way, how many doors. They look around every 5 seconds on their own.</p>
+      </div>
+      <div class="panel">
+        <label for="q">Then walk to (outdoors, optional)</label>
+        <input id="q" type="text" placeholder="Search a place, e.g. Jay St–MetroTech" autocomplete="off" enterkeyhint="search">
+        <div class="chips" id="recent"></div>
+        <ul class="results" id="results"></ul>
+        <button class="big" id="start" disabled>Start on glasses</button>
+      </div>
+    </div>
+
+    <div id="live" hidden>
+      <div class="hud" id="mirror"></div>
+      <div id="map"></div>
+      <p class="note" id="pdetail"></p>
+      <div class="panel" style="margin-top:12px">
+        <div id="stepsbox"><span class="lbl">Route</span><ul class="steps" id="steps"></ul></div>
+        <div class="row">
+          <label class="btn file">📷 Verify with phone<input type="file" accept="image/*" capture="environment" id="phonecam"></label>
+        </div>
+        <div class="row" id="manual">
+          <button class="btn" id="back">◀ Back</button>
+          <button class="btn" id="next">Next ▶</button>
+        </div>
+        <div class="row"><button class="btn" id="stop">End trip</button></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- REVIEW -->
+  <section id="tab-review" hidden>
+    <div class="panel">
+      <div id="rtitle" style="font-weight:600;margin-bottom:10px">No trip yet</div>
+      <div class="stats">
+        <div><b id="sverified">0</b><span>verified</span></div>
+        <div><b id="swrong">0</b><span>wrong turns / reroutes</span></div>
+        <div><b id="stime">0:00</b><span>trip time</span></div>
+      </div>
+    </div>
+    <div class="panel"><ul class="tl" id="timeline"></ul></div>
+  </section>
+
+  <!-- ASK -->
+  <section id="tab-ask" hidden>
+    <div class="panel">
+      <label>Photo (optional)</label>
+      <input id="askphoto" type="file" accept="image/*" capture="environment">
+      <label style="margin-top:12px">Question</label>
+      <input id="askq" type="text" placeholder="e.g. which exit is this?">
+      <button class="big" id="asksend">Ask &amp; show on glasses</button>
+      <p class="note" id="askout"></p>
+    </div>
+  </section>
+  <div id="err"></div>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let state = { active: false }, dest = null, fix = null, map = null, mapLine = null, mapMe = null, mapDest = null;
+
+  // ---------- helpers ----------
+  const api = async (path, body) => {
+    const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    return j;
+  };
+  const err = (m) => ($("err").textContent = m || "");
+  const fmt = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+  const clock = (ts) => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const esc = (t) => String(t ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const store = { get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+
+  async function downscale(file, max = 1280) {
+    const bmp = await createImageBitmap(file);
+    const s = Math.min(1, max / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas");
+    c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.85);
+  }
+
+  const ARROW = '<path d="M50 6 L90 48 L63 48 L63 94 L37 94 L37 48 L10 48 Z" fill="currentColor"/>';
+  const SHAPES = {
+    straight: ARROW, up: ARROW,
+    right: `<g transform="rotate(90 50 50)">${ARROW}</g>`, left: `<g transform="rotate(-90 50 50)">${ARROW}</g>`,
+    down: `<g transform="rotate(180 50 50)">${ARROW}</g>`,
+    back: '<path d="M30 92 L30 42 A22 22 0 0 1 74 42 L74 60" fill="none" stroke="currentColor" stroke-width="13"/><path d="M74 88 L56 58 L92 58 Z" fill="currentColor"/>',
+    arrive: '<circle cx="50" cy="50" r="42" fill="none" stroke="currentColor" stroke-width="9"/><path d="M28 52 L44 68 L74 34" fill="none" stroke="currentColor" stroke-width="11"/>',
+    scan: '<path d="M8 30 V8 H30 M70 8 H92 V30 M92 70 V92 H70 M30 92 H8 V70" fill="none" stroke="currentColor" stroke-width="9"/><circle cx="50" cy="50" r="10" fill="currentColor"/>',
+  };
+
+  // ---------- tabs ----------
+  document.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => {
+    document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+    ["go", "review", "ask"].forEach((t) => ($("tab-" + t).hidden = t !== b.dataset.tab));
+    if (b.dataset.tab === "review") refresh();
+  }));
+
+  // ---------- GPS (real phone location; needs https) ----------
+  let lastSent = 0;
+  // iPhones only report GPS when they think you moved, so keep re-sending the latest fix every 2 s.
+  function sendFix() {
+    if (!fix || Date.now() - fix.t > 30000) return;
+    lastSent = Date.now();
+    api("/api/naviq/loc", { lat: fix.lat, lon: fix.lon, acc: fix.acc, speed: fix.speed })
+      .then(() => { $("pgps").textContent = `GPS ±${Math.round(fix.acc)} m`; $("pgps").className = "pill on"; })
+      .catch(() => { $("pgps").textContent = `GPS ±${Math.round(fix.acc)} m · not sent`; $("pgps").className = "pill bad"; });
+  }
+  setInterval(sendFix, 1000);
+  function startGps() {
+    const p = $("pgps");
+    if (!window.isSecureContext) { p.textContent = "GPS needs the https link"; p.className = "pill bad"; return; }
+    if (!navigator.geolocation) { p.textContent = "no GPS"; p.className = "pill bad"; return; }
+    navigator.geolocation.watchPosition((pos) => {
+      fix = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy, speed: pos.coords.speed ?? undefined, t: Date.now() };
+      p.textContent = `GPS ±${Math.round(fix.acc)} m`; p.className = "pill on";
+      if (Date.now() - lastSent > 300) sendFix(); // every new GPS reading goes out right away
+      drawMe();
+    }, (e) => { p.textContent = "GPS: " + e.message; p.className = "pill bad"; }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+  }
+
+  // ---------- destination search (OpenStreetMap) ----------
+  async function search(q, listEl, onPick) {
+    if (!q.trim()) return;
+    listEl.innerHTML = `<li class="empty">Searching…</li>`;
+    try {
+      const qs = new URLSearchParams({ q, ...(fix ? { lat: fix.lat, lon: fix.lon } : {}) });
+      const { results } = await api("/api/geo/search?" + qs);
+      listEl.innerHTML = results.length ? results.map((r, i) => `<li data-i="${i}"><b>${esc(r.name)}</b><small>${esc(r.address)}</small></li>`).join("") : `<li class="empty">No places found</li>`;
+      listEl.querySelectorAll("li[data-i]").forEach((li) => (li.onclick = () => {
+        listEl.querySelectorAll("li").forEach((x) => x.classList.toggle("sel", x === li));
+        onPick(results[Number(li.dataset.i)]);
+      }));
+    } catch (e) { listEl.innerHTML = `<li class="empty">${esc(e.message)}</li>`; }
+  }
+  function pickDest(p) {
+    dest = { name: p.name, lat: p.lat, lon: p.lon };
+    updateStart();
+  }
+  function renderRecent() {
+    const rec = store.get("naviq.recent", []);
+    $("recent").innerHTML = rec.map((r, i) => `<button data-i="${i}">↺ ${esc(r.name)}</button>`).join("");
+    $("recent").querySelectorAll("button").forEach((b) => (b.onclick = () => { pickDest(rec[Number(b.dataset.i)]); $("results").innerHTML = ""; }));
+  }
+  let qTimer;
+  $("q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(() => search($("q").value, $("results"), pickDest), 700); });
+  $("q").addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(qTimer); search($("q").value, $("results"), pickDest); } });
+
+  const isRoom = (t) => /^[A-Za-z]{1,2}\s*-?\s*\d{3,4}$/.test(t.trim());
+  $("start").onclick = async () => {
+    const typed = $("room").value.trim();
+    if (typed && !isRoom(typed)) {
+      // Not a room number: treat it as a place to walk to.
+      $("q").value = typed; $("room").value = ""; updateStart();
+      err("Pick the place from the list, then tap Start.");
+      search(typed, $("results"), (p) => { pickDest(p); err(""); });
+      return;
+    }
+    err(""); $("start").disabled = true;
+    try {
+      const room = $("room").value.trim();
+      await api("/api/naviq/start", { room: room || undefined, exit: exitMode || undefined, destination: dest || undefined });
+      sendFix();
+      try { if (navigator.wakeLock) window.__wake = await navigator.wakeLock.request("screen"); } catch {}
+      if (dest) store.set("naviq.recent", [dest, ...store.get("naviq.recent", []).filter((r) => r.name !== dest.name)].slice(0, 5));
+      await refresh();
+    } catch (e) { err(e.message); } finally { $("start").disabled = false; }
+  };
+
+  // ---------- live trip ----------
+  function renderMirror(card) {
+    const n = card.nav;
+    $("mirror").innerHTML = n
+      ? `<div class="top"><span>NAVIQ · ${esc(String(n.mode).toUpperCase())}</span><span>${n.total ? n.step + "/" + n.total : ""}</span></div>
+         <div class="mid"><svg viewBox="0 0 100 100">${SHAPES[n.arrow] || ARROW}</svg><div class="instr">${esc(n.instruction)}</div></div>
+         <div class="detail">${esc(n.detail)}</div><div class="status">${esc(n.status)}</div><div class="dest">${n.dest ? "TO " + esc(n.dest) : ""}</div>`
+      : `<div class="t">${esc(card.title)}</div>${(card.lines || []).map((l) => `<div class="l">${esc(l)}</div>`).join("")}`;
+    $("pdetail").textContent = card.phone_detail || "";
+  }
+
+  function drawMap() {
+    const o = state.outdoor;
+    $("map").style.display = o && window.L ? "block" : "none";
+    if (!o || !window.L) return;
+    if (!map) {
+      map = L.map("map", { zoomControl: false, attributionControl: true });
+      const mb = window.__mapbox;
+      if (mb) L.tileLayer(`https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/256/{z}/{x}/{y}@2x?access_token=${mb}`, { maxZoom: 20, attribution: "© Mapbox © OpenStreetMap" }).addTo(map);
+      else L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+    }
+    const pts = (o.line || []).map((p) => [p.lat, p.lon]);
+    if (!pts.length && fix) map.setView([fix.lat, fix.lon], 17);
+    if (mapLine) mapLine.remove();
+    if (pts.length) { mapLine = L.polyline(pts, { color: "#0a8a3a", weight: 6 }).addTo(map); map.fitBounds(mapLine.getBounds(), { padding: [24, 24] }); }
+    if (mapDest) mapDest.remove();
+    mapDest = L.circleMarker([o.to.lat, o.to.lon], { radius: 8, color: "#c2410c", fillOpacity: 1 }).addTo(map).bindTooltip(o.to.name);
+    drawMe();
+    setTimeout(() => map.invalidateSize(), 50);
+  }
+  function drawMe() {
+    if (!map || !fix) return;
+    if (!map._loaded) map.setView([fix.lat, fix.lon], 17);
+    if (mapMe) mapMe.setLatLng([fix.lat, fix.lon]);
+    else mapMe = L.circleMarker([fix.lat, fix.lon], { radius: 7, color: "#2563eb", fillOpacity: 1 }).addTo(map);
+  }
+
+  function renderSteps() {
+    $("stepsbox").hidden = state.outdoorOnly;
+    $("manual").hidden = state.outdoorOnly;
+    $("steps").innerHTML = (state.checkpoints || []).map((c, i) => {
+      const cls = i < state.index || (state.done && i === state.index) ? "done" : i === state.index ? "done cur" : i === state.index + 1 ? "cur" : "";
+      return `<li class="${cls}"><span class="dot"></span>${esc(c.label)}${c.walkTo ? ` → walk to ${esc(c.walkTo)}` : ""}<span class="mode">${esc(c.mode)}</span></li>`;
+    }).join("");
+  }
+
+  const RESULT = {
+    verified: ["✓", "ok", "Verified"], "re-verified": ["✓", "ok", "Re-verified"], arrived: ["★", "ok", "Arrived"], "arrived-gps": ["◎", "ok", "Reached by GPS"],
+    "outside-gps": ["◎", "ok", "Outside detected"], recovered: ["↩", "ok", "Back on route"], located: ["◎", "ok", "Located"], "wrong-turn": ["⚠", "warn", "Wrong turn"],
+    reroute: ["⚠", "warn", "Rerouted"], unverified: ["?", "", "Couldn't verify"], manual: ["•", "", "Manual step"], error: ["⚠", "warn", "Error"],
+  };
+
+  function renderReview() {
+    const h = state.history || [];
+    $("rtitle").textContent = state.routeName ? `${state.routeName}${state.done ? " · complete" : state.active ? " · in progress" : ""}` : "No trip yet";
+    $("sverified").textContent = h.filter((e) => ["verified", "arrived", "recovered", "arrived-gps"].includes(e.result)).length;
+    $("swrong").textContent = h.filter((e) => ["wrong-turn", "reroute"].includes(e.result)).length;
+    $("stime").textContent = state.startedAt ? fmt((state.endedAt || Date.now()) - state.startedAt) : "0:00";
+    $("timeline").innerHTML = h.length ? h.map((e) => {
+      const [icon, cls, word] = RESULT[e.result] || ["·", "", e.result];
+      const sub = [e.sign_text ? `read “${esc(e.sign_text)}”` : "", e.confidence && e.confidence !== "gps" ? `${e.confidence} confidence` : "", e.ms ? `${(e.ms / 1000).toFixed(1)}s` : ""].filter(Boolean).join(" · ");
+      return `<li data-frame="${e.frame ?? ""}"><time>${clock(e.ts)}</time><span class="${cls}">${icon}</span>
+        <div><b>${word}</b> ${esc(e.label || "")}<div class="sub">${sub}</div>${e.frame != null ? `<img alt="what the glasses saw">` : ""}</div></li>`;
+    }).join("") : `<li class="empty">Your trip shows up here: each verified sign (with the photo), GPS arrivals, wrong turns and reroutes.</li>`;
+  }
+  document.addEventListener("click", (ev) => {
+    const li = ev.target.closest(".tl li[data-frame]");
+    if (!li || li.dataset.frame === "") return;
+    const img = li.querySelector("img");
+    if (img && !img.src) img.src = "/api/naviq/frame?i=" + li.dataset.frame;
+    li.classList.toggle("open");
+  });
+
+  async function refresh() {
+    try {
+      state = await api("/api/naviq/state");
+      $("plan").hidden = state.active;
+      $("live").hidden = !state.active && !state.done;
+      if (state.card) renderMirror(state.card);
+      renderSteps(); drawMap(); renderReview();
+    } catch (e) { err(e.message); }
+  }
+
+  $("next").onclick = () => api("/api/naviq/step", { dir: "next" }).then(refresh).catch((e) => err(e.message));
+  $("back").onclick = () => api("/api/naviq/step", { dir: "back" }).then(refresh).catch((e) => err(e.message));
+  $("stop").onclick = async () => {
+    await api("/api/naviq/stop", {}).catch((e) => err(e.message));
+    await refresh();
+    $("live").hidden = true; $("plan").hidden = false;
+    document.querySelector('.tabs button[data-tab="review"]').click();
+  };
+  $("phonecam").onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    err("Verifying with phone camera…");
+    try { await api("/api/naviq/observe", { image: await downscale(f) }); err(""); await refresh(); } catch (x) { err(x.message); }
+    e.target.value = "";
+  };
+
+  // ---------- trip setup ----------
+  let exitMode = false;
+  function updateStart() {
+    const room = $("room").value.trim().toUpperCase();
+    const indoor = exitMode ? "the exit" : room;
+    $("start").disabled = !indoor && !dest;
+    $("start").textContent = indoor || dest ? `Start: ${[indoor, dest && dest.name].filter(Boolean).join(" → ")}` : "Start on glasses";
+    $("exitbtn").classList.toggle("sel", exitMode);
+  }
+  $("room").addEventListener("input", () => { if ($("room").value) exitMode = false; updateStart(); });
+  $("exitbtn").onclick = () => { exitMode = !exitMode; if (exitMode) $("room").value = ""; updateStart(); };
+
+  // ---------- ask ----------
+  $("asksend").onclick = async () => {
+    $("askout").textContent = "Thinking…";
+    try {
+      const f = $("askphoto").files[0];
+      const card = await api("/api/card", { mode: "assist", text: $("askq").value, image: f ? await downscale(f) : undefined });
+      $("askout").textContent = `${card.title}: ${card.phone_detail}`;
+    } catch (e) { $("askout").textContent = e.message; }
+  };
+
+  // ---------- live updates ----------
+  let streamOk = false, lastTs = 0;
+  setInterval(async () => {
+    if (streamOk) return;
+    try {
+      const card = await api("/api/state");
+      $("pconn").textContent = "live (polling)"; $("pconn").className = "pill on";
+      if (card.ts !== lastTs) { lastTs = card.ts; renderMirror(card); if (card.nav) refresh(); }
+    } catch { $("pconn").textContent = "offline"; $("pconn").className = "pill bad"; }
+  }, 700);
+  (function connect() {
+    const es = new EventSource("/api/events");
+    es.onopen = () => { streamOk = true; $("pconn").textContent = "live"; $("pconn").className = "pill on"; };
+    es.onerror = () => { streamOk = false; $("pconn").textContent = "reconnecting…"; $("pconn").className = "pill bad"; };
+    es.onmessage = (e) => {
+      streamOk = true;
+      const card = JSON.parse(e.data);
+      lastTs = card.ts;
+      renderMirror(card);
+      if (card.nav) refresh();
+    };
+  })();
+
+  document.addEventListener("visibilitychange", async () => {
+    if (document.visibilityState === "visible" && state.active && navigator.wakeLock) { try { window.__wake = await navigator.wakeLock.request("screen"); } catch {} }
+  });
+  api("/api/config").then((c) => { window.__mapbox = c.mapboxToken; }).catch(() => {});
+  startGps();
+  renderRecent();
+  refresh().catch((e) => err(e.message));
+  setInterval(() => { if (state.active) $("stime").textContent = fmt(Date.now() - state.startedAt); }, 1000);
+</script>
+</body>
+</html>

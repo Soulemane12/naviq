@@ -1,0 +1,9 @@
+node_modules/
+microlumin/
+.env
+*.apk
+bin/
+.DS_Store
+.speedtest.mjs
+.bench.mjs
+.scenetest.mjs

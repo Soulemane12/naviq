@@ -1,0 +1,1016 @@
+// NAVIQ navigation engine. Real data only: phone GPS, OpenStreetMap walking directions, and signs read by
+// the glasses camera. Nothing here is simulated or pre-filled.
+//
+// A trip chains legs that switch automatically:
+//   INDOOR / SUBWAY ── checkpoints verified by reading real signs (there is no indoor GPS, so signs are
+//                      the "you are here"). Indoor routes come from the recorder: walk the path once and
+//                      tap at each sign.
+//   OUTDOOR         ── phone GPS + OpenStreetMap walking directions to a real, geocoded destination,
+//                      rerouting when you drift off the path.
+//
+// Sign verification: the vision model only answers "which known landmark is clearly visible, and what
+// does its sign say?". Plain code decides: verified / back on route / wrong turn / can't verify.
+
+import fs from "node:fs/promises";
+import path from "node:path";
+import crypto from "node:crypto";
+import { z } from "zod";
+
+const VERIFY_SYSTEM = `You check navigation checkpoints for a person wearing smart glasses.
+You get one first-person camera frame and a list of known landmarks. Each has an id and a description of its sign or appearance.
+Decide which ONE landmark is clearly visible in the frame. Match readable sign text first (room numbers, station names, line letters, direction words), then distinctive appearance.
+Be strict. If no listed landmark is clearly identifiable, answer "none". Never infer a landmark from context alone.
+confidence: "high" = sign text clearly readable and matches; "medium" = partly readable or matched by appearance; "low" = unsure.
+sign_text: the exact text you can read on any sign in view (empty string if none).
+reason: one short sentence.`;
+
+const READ_SYSTEM = `You read signs for a person recording a walking route with smart glasses.
+Find the single most prominent sign in the first-person camera frame (room number plate, exit sign, stairs or elevator sign, hallway or directory sign, subway station or platform sign).
+sign_text: its exact text as printed, nothing invented. Empty string if no sign is readable.
+kind: what the sign is; "none" if there is no readable sign.
+description: how to recognise this spot again (sign shape and colour, what's around it), one sentence.`;
+
+const PLAN_READ_SYSTEM = `You read a photo of a building floor plan or evacuation map that is posted on a wall.
+List every labelled place you can actually read on it: room numbers, exits, stairs, elevators, restrooms, offices, entrances.
+Only include labels printed on the plan. Never invent or guess labels.
+building / floor: from the plan's title if shown, else empty string.
+you_are_here: the label nearest the "You are here" marker if there is one, else empty string.
+readable: false if this is not a floor plan or its labels can't be read.
+notes: one sentence on the layout (e.g. "one long east-west corridor, exits at both ends").`;
+
+const PLAN_GUIDE_SYSTEM = `You guide a person wearing smart glasses inside a building, using the building's posted floor plan.
+Image 1 is the floor plan (often a photo of an evacuation map). Image 2 is what the wearer sees right now; the camera faces the way they face.
+1. Read any room numbers, signs or labels visible in image 2 and find them on the floor plan.
+2. Work out where the wearer is standing and which way they are facing.
+3. Give the single next move toward the destination. arrow is relative to the way they face. instruction: at most 16 characters, uppercase, e.g. "TURN LEFT". detail: at most 28 characters, e.g. "past A103 to the exit".
+Be honest. If what's visible doesn't let you place the wearer on the plan, set located=false and confidence="low", and use detail to say what to look at (e.g. "Face a room number"). Never invent rooms that aren't on the plan.
+arrived=true only when the destination is clearly right in front of the wearer.
+location: where they are on the plan in a few words, e.g. "corridor outside A105, facing the lobby".
+seen_text: the exact text you read in image 2 (empty if none).`;
+
+const ROOM_READ_SYSTEM = `You are the eyes of a person wearing smart glasses indoors. Describe only what is actually in the frame.
+rooms: every room number you can read (door plates, wall plaques), with where it sits in the frame: "left", "center" or "right".
+numbers_increase: if two or more room numbers are visible, the way the numbers go UP from the wearer's point of view: "left", "right", "ahead" (further down the corridor) or "behind". "unknown" with fewer than two numbers.
+signs: every directional or wayfinding sign you can read: exact text, its arrow ("left", "right", "straight", "up", "down" or "none"), and kind: "room_range" (e.g. "A101-A120"), "exit", "stairs", "elevator" or "other".
+exit: the nearest way OUT of the building you can see, judged by how things look, not only by signs: glass doors to the street, revolving doors, entrance/exit doors, daylight or street through doors, an EXIT sign. visible=false if none is in view. position in the frame. cue: what it is, a few words. path: how to get there if something is in the way (e.g. "through the turnstiles"), else empty.
+stairs / elevator: visible (by look or sign) and position in the frame.
+outdoors: the wearer is clearly outside the building.
+Never invent text, rooms or doors that aren't in the frame.`;
+
+const MAX_FRAMES = 60;
+const ROUTER = process.env.NAVIQ_ROUTER ?? "https://routing.openstreetmap.de/routed-foot/route/v1/foot";
+const UA = "naviq-hackathon/1.0";
+
+const INSTRUCTION = {
+  left: "TURN LEFT", right: "TURN RIGHT", straight: "GO STRAIGHT", back: "TURN AROUND",
+  up: "GO UPSTAIRS", down: "GO DOWNSTAIRS", elevator: "TAKE ELEVATOR", arrive: "YOU'RE HERE",
+};
+
+// ---------- geo helpers ----------
+const R_EARTH = 6371000;
+const rad = (d) => (d * Math.PI) / 180;
+function dist(a, b) {
+  const dLat = rad(b.lat - a.lat), dLon = rad(b.lon - a.lon);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R_EARTH * Math.asin(Math.sqrt(h));
+}
+function bearing(a, b) {
+  const y = Math.sin(rad(b.lon - a.lon)) * Math.cos(rad(b.lat));
+  const x = Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) - Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(rad(b.lon - a.lon));
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+const COMPASS = ["NORTH", "NORTHEAST", "EAST", "SOUTHEAST", "SOUTH", "SOUTHWEST", "WEST", "NORTHWEST"];
+const compass = (deg) => COMPASS[Math.round(deg / 45) % 8];
+const roundDist = (m) => (m >= 100 ? Math.round(m / 10) * 10 : Math.max(5, Math.round(m / 5) * 5));
+function segDist(p, a, b) {
+  const kx = Math.cos(rad(p.lat)) * 111320, ky = 110540;
+  const ax = (a.lon - p.lon) * kx, ay = (a.lat - p.lat) * ky, bx = (b.lon - p.lon) * kx, by = (b.lat - p.lat) * ky;
+  const dx = bx - ax, dy = by - ay;
+  const t = dx || dy ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / (dx * dx + dy * dy))) : 0;
+  return Math.hypot(ax + t * dx, ay + t * dy);
+}
+
+// Project p onto segment a-b: perpendicular distance (m) and position t (0..1) along it.
+function segProj(p, a, b) {
+  const kx = Math.cos(rad(p.lat)) * 111320, ky = 110540;
+  const ax = (a.lon - p.lon) * kx, ay = (a.lat - p.lat) * ky, bx = (b.lon - p.lon) * kx, by = (b.lat - p.lat) * ky;
+  const dx = bx - ax, dy = by - ay;
+  const t = dx || dy ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / (dx * dx + dy * dy))) : 0;
+  return { d: Math.hypot(ax + t * dx, ay + t * dy), t };
+}
+// Distance under 100 m to the metre; beyond that, to 10 m (GPS can't do better far out anyway).
+const exactDist = (m) => (m >= 100 ? Math.round(m / 10) * 10 : Math.max(0, Math.round(m)));
+
+function maneuverView(step) {
+  const m = step.maneuver, mod = m.modifier ?? "straight";
+  if (m.type === "arrive") return { arrow: "arrive", instruction: "ARRIVING", detail: step.name || "destination" };
+  if (m.type === "depart") return { arrow: "straight", instruction: `HEAD ${compass(m.bearing_after)}`, detail: step.name ? `on ${step.name}` : "along the path" };
+  const arrow = mod.includes("left") ? "left" : mod.includes("right") ? "right" : mod === "uturn" ? "back" : "straight";
+  const instruction =
+    mod === "uturn" ? "TURN AROUND" : mod.startsWith("slight") ? `BEAR ${arrow.toUpperCase()}` : arrow === "straight" ? "CONTINUE" : `TURN ${arrow.toUpperCase()}`;
+  return { arrow, instruction, detail: step.name ? `onto ${step.name}` : step.toward ? `toward ${step.toward}` : "on the path" };
+}
+
+// Walking routes follow sidewalk/crosswalk geometry, which produces fake turns: a 10 m "right" onto a
+// crosswalk then "left" back to the same heading. Keep only turns a person would call a turn.
+const turnAngle = (a, b) => ((b - a + 540) % 360) - 180; // signed degrees
+function simplifySteps(steps) {
+  const out = [];
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i], m = st.maneuver;
+    if (m.type === "depart" || m.type === "arrive") { out.push(st); continue; }
+    const nx = steps[i + 1];
+    // jog: short sideways segment, then back to (about) the original heading → not a turn at all
+    if (nx && nx.maneuver.type !== "arrive" && st.distance < 20 && Math.abs(turnAngle(m.bearing_before, nx.maneuver.bearing_after)) < 35) { i++; continue; }
+    if (Math.abs(turnAngle(m.bearing_before, m.bearing_after)) < 25) continue; // gentle bend
+    out.push(st);
+  }
+  // Unnamed segments ("along the path") read better as "toward <next named street>".
+  out.forEach((st, i) => { if (!st.name) st.toward = out.slice(i + 1).find((x) => x.name)?.name ?? ""; });
+  return out;
+}
+
+// Mapbox walking directions when MAPBOX_TOKEN is set (cleaner routes on real NYC sidewalks), else the free
+// OpenStreetMap router. Same response shape (Mapbox Directions is OSRM-compatible).
+async function fetchWalk(from, to) {
+  const tok = process.env.MAPBOX_TOKEN;
+  if (tok) {
+    try {
+      return await fetchWalkFrom(`https://api.mapbox.com/directions/v5/mapbox/walking/${from.lon},${from.lat};${to.lon},${to.lat}?overview=full&geometries=geojson&steps=true&access_token=${tok}`, "mapbox");
+    } catch (err) {
+      console.error(`[directions] mapbox failed (${err.message}), falling back to OpenStreetMap`);
+    }
+  }
+  return fetchWalkFrom(`${ROUTER}/${from.lon},${from.lat};${to.lon},${to.lat}?overview=full&geometries=geojson&steps=true`, "osm");
+}
+
+async function fetchWalkFrom(url, source) {
+  const res = await fetch(url, { headers: { "user-agent": UA }, signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`directions HTTP ${res.status}`);
+  const j = await res.json();
+  const r = j.routes?.[0];
+  if (j.code !== "Ok" || !r) throw new Error(`directions: ${j.code}`);
+  const line = r.geometry.coordinates.map(([lon, lat]) => ({ lat, lon }));
+  const steps = r.legs[0].steps.map((st) => {
+    const at = { lat: st.maneuver.location[1], lon: st.maneuver.location[0] };
+    let li = 0, best = Infinity;
+    line.forEach((p, i) => { const d = dist(p, at); if (d < best) { best = d; li = i; } });
+    return { maneuver: st.maneuver, name: st.name, distance: st.distance, at, lineIndex: li };
+  });
+  return { line, steps: simplifySteps(steps), distance: r.distance, duration: r.duration, source };
+}
+
+const slug = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30) || "sign";
+const norm = (t) => String(t).toLowerCase().replace(/[^a-z0-9]/g, "");
+// Words with digits (room numbers) are the most reliable match; otherwise the whole sign text.
+function matchTokens(text) {
+  const digits = String(text).split(/[\s\-–—·,/()]+/).filter((w) => /\d/.test(w));
+  return digits.length ? digits : [text];
+}
+
+// "A105" → building A, floor 1, number 105. "A1205" → floor 12.
+function parseRoom(t) {
+  const m = /([A-Z]{1,2})\s*-?\s*(\d{3,4})\b/.exec(String(t).toUpperCase());
+  if (!m) return null;
+  const num = Number(m[2]);
+  return { label: m[1] + m[2], bldg: m[1], num, floor: Math.floor(num / 100) };
+}
+const OPPOSITE = { left: "right", right: "left", ahead: "behind", behind: "ahead" };
+const DIR_ARROW = { left: "left", right: "right", ahead: "straight", behind: "back", straight: "straight", up: "up", down: "down", here: "straight" };
+const DIR_WORD = { left: "TURN LEFT", right: "TURN RIGHT", ahead: "GO STRAIGHT", behind: "TURN AROUND", straight: "GO STRAIGHT", up: "GO UP", down: "GO DOWN" };
+
+export function createNav({ routesFile, askJSON, broadcast }) {
+  let s = null; // active trip
+  let rec = null; // active recording
+  let busy = false;
+  let inflight = 0;
+  let lastFix = null;
+  let heading = null; // which way the wearer's head faces (from the glasses compass), degrees from north // latest phone GPS, kept even between trips so a new trip can route immediately // room trips run two looks at once (two "workers" on alternating frames)
+
+  async function loadRoutes() {
+    try {
+      return JSON.parse(await fs.readFile(routesFile, "utf8")).routes ?? [];
+    } catch {
+      return [];
+    }
+  }
+  async function saveRoutes(routes) {
+    await fs.writeFile(routesFile, JSON.stringify({ routes }, null, 2) + "\n");
+  }
+
+  // ---------- floor plans (photos of the plans posted in the building, read by the vision model) ----------
+  const plansDir = path.join(path.dirname(routesFile), "plans");
+  const plansIndex = path.join(plansDir, "index.json");
+  async function listPlans() {
+    try {
+      return JSON.parse(await fs.readFile(plansIndex, "utf8"));
+    } catch {
+      return [];
+    }
+  }
+  async function addPlan(image) {
+    if (!image) throw Object.assign(new Error("no photo"), { status: 400 });
+    const PlanRead = z.object({
+      building: z.string(),
+      floor: z.string(),
+      places: z.array(z.object({ label: z.string(), kind: z.enum(["room", "exit", "stairs", "elevator", "restroom", "office", "entrance", "other"]) })),
+      you_are_here: z.string(),
+      readable: z.boolean(),
+      notes: z.string(),
+    });
+    const read = await askJSON({ system: PLAN_READ_SYSTEM, prompt: "Read this floor plan.", images: [image], schema: PlanRead, name: "floor_plan", effort: "plan" });
+    if (!read.readable || !read.places.length) throw Object.assign(new Error("Couldn't read a floor plan in that photo. Get closer and keep it straight."), { status: 422 });
+    const id = crypto.randomBytes(5).toString("hex");
+    const m = /^data:image\/\w+;base64,(.+)$/.exec(image);
+    await fs.mkdir(plansDir, { recursive: true });
+    await fs.writeFile(path.join(plansDir, `${id}.jpg`), Buffer.from(m[1], "base64"));
+    const plan = { id, building: read.building, floor: read.floor, places: read.places, you_are_here: read.you_are_here, notes: read.notes, createdAt: new Date().toISOString() };
+    const all = await listPlans();
+    all.push(plan);
+    await fs.writeFile(plansIndex, JSON.stringify(all, null, 2) + "\n");
+    return plan;
+  }
+  async function planImage(id) {
+    if (!/^[a-f0-9]{10}$/.test(String(id))) return null;
+    try {
+      return `data:image/jpeg;base64,${(await fs.readFile(path.join(plansDir, `${id}.jpg`))).toString("base64")}`;
+    } catch {
+      return null;
+    }
+  }
+  async function deletePlan(id) {
+    const all = (await listPlans()).filter((p) => p.id !== id);
+    await fs.writeFile(plansIndex, JSON.stringify(all, null, 2) + "\n");
+    await fs.rm(path.join(plansDir, `${id}.jpg`), { force: true });
+    return all;
+  }
+
+  const route = () => s?.route;
+  const cp = (i) => route()?.checkpoints[i] ?? null;
+  const ICON = { ok: "✓", warn: "⚠", unknown: "?", pending: "…", arrived: "✓", manual: "•", gps: "◎" };
+
+  function buildCard(kind, statusText, extra = {}) {
+    const r = route();
+    const total = r.checkpoints.length;
+    let nav;
+    if (s.finalView) nav = { mode: "outdoor", ...s.finalView };
+    else if (s.plan && !s.outdoor) nav = { mode: "indoor", ...(s.planView ?? { arrow: "scan", instruction: "LOOK AROUND", detail: "Face a room number or sign" }) };
+    else if (s.room && !s.outdoor) nav = { mode: "indoor", ...(s.roomView ?? { arrow: "scan", instruction: "LOOK AROUND", detail: "Face a room number" }) };
+    else if (s.offRoute) {
+      const o = r.offRoute.find((x) => x.id === s.offRoute);
+      nav = { mode: (cp(Math.max(s.index, 0)) ?? {}).mode ?? "indoor", arrow: "back", instruction: "WRONG WAY", detail: o.recover };
+    } else if (s.outdoor?.view) nav = { mode: "outdoor", ...s.outdoor.view };
+    else if (s.index < 0) {
+      const first = cp(0);
+      nav = { mode: first.mode, arrow: "scan", instruction: "FIND START", detail: `Look at the ${first.label} sign` };
+    } else {
+      const c = cp(s.index);
+      nav = { mode: c.mode, arrow: c.arrow, instruction: c.instruction, detail: c.detail };
+    }
+    Object.assign(nav, {
+      kind,
+      status: `${ICON[kind] ?? ""} ${statusText}`.trim(),
+      dest: r.destination,
+      step: r.outdoorOnly ? 0 : Math.max(0, s.index + 1),
+      total: r.outdoorOnly ? 0 : total,
+      modeChanged: Boolean(extra.modeChanged),
+      ...(extra.dist ?? {}),
+      auto: Boolean(((s.plan && !s.plan.done) || (s.room && !s.room.done)) && !s.outdoor && !s.done), // glasses look on their own
+      autoMs: s.room ? 900 : 8000,
+    });
+    if (s.plan || s.room) { nav.step = 0; nav.total = 0; }
+    return {
+      title: nav.instruction,
+      lines: [nav.detail, nav.status],
+      speak: extra.speak ?? "",
+      phone_detail: extra.phoneDetail ?? `${nav.instruction}: ${nav.detail}. ${nav.status}.`,
+      nav,
+    };
+  }
+
+  function emit(kind, statusText, extra) {
+    s.lastCard = buildCard(kind, statusText, extra);
+    broadcast(s.lastCard);
+    return s.lastCard;
+  }
+
+  function state() {
+    if (!s) return { active: false };
+    const r = route();
+    const o = s.outdoor;
+    return {
+      active: !s.done,
+      done: s.done,
+      routeName: r.name,
+      destination: r.destination,
+      outdoorOnly: Boolean(r.outdoorOnly || r.plan || r.room),
+      room: s.room ? { target: s.room.target.label ?? "EXIT", last: s.room.last?.label ?? null, done: Boolean(s.room.done) } : null,
+      plan: s.plan ? { id: s.plan.id, target: s.plan.target, last: s.plan.last ?? null, done: Boolean(s.plan.done) } : null,
+      index: s.index,
+      total: r.checkpoints.length,
+      checkpoints: r.outdoorOnly ? [] : r.checkpoints.map((c) => ({ id: c.id, label: c.label, mode: c.mode, walkTo: c.walkTo?.name ?? null })),
+      offRoute: s.offRoute,
+      wrongTurns: s.wrongTurns,
+      startedAt: s.startedAt,
+      endedAt: s.endedAt,
+      fix: s.fix,
+      outdoor: o ? { to: o.to, line: o.line, distance: o.distance, remaining: o.remaining, next: o.nextDist, waiting: Boolean(o.waiting), error: o.error ?? null } : null,
+      history: s.history,
+      card: s.lastCard,
+    };
+  }
+
+  // ---------- outdoor leg (real GPS + OpenStreetMap directions) ----------
+
+  function startOutdoor(c, toIndex) {
+    const to = c.walkTo;
+    s.outdoor = { to, toIndex, line: [], steps: [], stepIdx: 0, view: null, near: false, rerouteAt: 0, waiting: false };
+    const fresh = s.fix && Date.now() - s.fix.ts < 30000 && s.fix.acc <= 80;
+    if (fresh) return routeOutdoor(s.fix, "Directions ready");
+    s.outdoor.waiting = true;
+    s.outdoor.view = { arrow: "scan", instruction: "FINDING YOU", detail: `Walking to ${to.name}` };
+    emit("gps", "Waiting for phone GPS…", { speak: `Walking to ${to.name}. Waiting for GPS.` });
+  }
+
+  async function routeOutdoor(from, reason) {
+    const o = s.outdoor;
+    o.waiting = false;
+    try {
+      const w = await fetchWalk(from, o.to);
+      if (s?.outdoor !== o) return; // leg ended while fetching
+      const cum = [0];
+      for (let i = 1; i < w.line.length; i++) cum.push(cum[i - 1] + dist(w.line[i - 1], w.line[i]));
+      console.log(`[directions] ${w.source}: ${Math.round(w.distance)} m, ${w.steps.length} steps → ${w.steps.map((x) => x.maneuver.type + (x.maneuver.modifier ? "-" + x.maneuver.modifier : "") + (x.name ? "(" + x.name + ")" : "")).join(" → ")}`);
+      Object.assign(o, w, { cum, stepIdx: -1, error: null, near: false, now10: false, remaining: w.distance, lastBucket: null });
+      updateOutdoor(from, { reason, force: true });
+    } catch (err) {
+      if (s?.outdoor !== o) return;
+      // Directions service down: real straight-line compass guidance from the real GPS fix.
+      o.error = err.message;
+      o.line = [from, o.to];
+      o.steps = [];
+      const d = dist(from, o.to);
+      o.view = { arrow: "straight", instruction: `HEAD ${compass(bearing(from, o.to))}`, detail: `${o.to.name}, ${roundDist(d)} m` };
+      emit("gps", "Compass only (directions offline)", { speak: `Head ${compass(bearing(from, o.to)).toLowerCase()}, ${roundDist(d)} meters.` });
+    }
+  }
+
+  function arriveOutdoor() {
+    const o = s.outdoor;
+    s.history.push({ ts: Date.now(), result: "arrived-gps", label: o.to.name, confidence: "gps", ms: 0 });
+    if (o.toIndex >= route().checkpoints.length) {
+      s.outdoor = null;
+      s.done = true;
+      s.endedAt = Date.now();
+      s.finalView = { arrow: "arrive", instruction: "ARRIVED", detail: o.to.name };
+      emit("arrived", `Arrived: ${o.to.name}`, { speak: `You've arrived at ${o.to.name}.` });
+      return;
+    }
+    enterCheckpoint(o.toIndex);
+    const c = cp(o.toIndex);
+    emit("ok", `At ${o.to.name} (GPS)`, {
+      modeChanged: true,
+      speak: `${c.mode} mode. You're at ${o.to.name}. Find the ${c.label} sign and tap to verify.`,
+      phoneDetail: `GPS puts you at ${o.to.name}. Switched to ${c.mode} mode: tap at the ${c.label} sign to continue.`,
+    });
+  }
+
+  function updateOutdoor(fix, { reason = "", force = false } = {}) {
+    const o = s.outdoor;
+    if (!o) return;
+    if (o.waiting) return routeOutdoor(fix, "Got your location");
+    if (!o.steps.length) {
+      // compass mode: keep heading/distance live
+      const d = dist(fix, o.to);
+      if (d <= (o.to.arriveRadius ?? 30)) return arriveOutdoor();
+      o.view = { arrow: "straight", instruction: `HEAD ${compass(bearing(fix, o.to))}`, detail: `${o.to.name}, ${roundDist(d)} m` };
+      emit("gps", `Compass only · GPS ±${Math.round(fix.acc)} m`);
+      return;
+    }
+
+    // Arrival zone shrinks with good GPS: ±6 m → ~14 m, poor GPS → up to the route's 30 m.
+    const arriveR = Math.min(o.to.arriveRadius ?? 30, Math.max(12, (fix.acc ?? 30) + 8));
+    if (dist(fix, o.to) <= arriveR) return arriveOutdoor();
+
+    // Snap onto the route: closest point on the path, and how far along the path that is.
+    let off = Infinity, seg = 0, segT = 0;
+    for (let i = 0; i < o.line.length - 1; i++) {
+      const pr = segProj(fix, o.line[i], o.line[i + 1]);
+      if (pr.d < off) { off = pr.d; seg = i; segT = pr.t; }
+    }
+    if (off > Math.max(40, (fix.acc ?? 0) * 1.5) && fix.acc <= 30 && Date.now() - o.rerouteAt > 15000) {
+      o.rerouteAt = Date.now();
+      s.history.push({ ts: Date.now(), result: "reroute", label: `${Math.round(off)} m off the path`, confidence: "gps", ms: 0 });
+      emit("warn", "Off route, rerouting…", { speak: "Off route. Rerouting." });
+      routeOutdoor(fix, "Rerouted");
+      return;
+    }
+    const along = o.cum[seg] + segT * (o.cum[seg + 1] - o.cum[seg]);
+    const total = o.cum[o.cum.length - 1];
+    const toGo = Math.max(0, total - along);
+
+    // Next real maneuver ahead of us along the path (distance measured along the path, not straight-line).
+    let k = o.steps.findIndex((st, i) => i > 0 && o.cum[st.lineIndex] > along + 2);
+    if (k < 0) k = o.steps.length - 1;
+    const next = o.steps[k];
+    const d = Math.max(0, (next.maneuver.type === "arrive" ? total : o.cum[next.lineIndex]) - along);
+    o.nextDist = d;
+    o.remaining = toGo;
+
+    const view = maneuverView(next);
+    if (next.maneuver.type === "arrive") view.detail = o.to.name;
+    const stepChanged = k !== o.stepIdx;
+    const near30 = d <= 30, near10 = d <= 10;
+    let speak = "";
+    if (force || stepChanged) speak = `${reason ? reason + ". " : ""}In ${exactDist(d)} meters, ${view.instruction.toLowerCase()} ${view.detail}.`;
+    else if (near10 && !o.now10 && next.maneuver.type !== "arrive") speak = `${view.instruction.toLowerCase()} now.`;
+    else if (near30 && !o.near) speak = `In ${exactDist(d)} meters, ${view.instruction.toLowerCase()}.`;
+    o.stepIdx = k; o.near = near30; o.now10 = near10; o.view = view;
+    const gps = `GPS ±${Math.round(fix.acc)} m`;
+    // Where to walk right now: the point ~12 m further along the path. The glasses rotate their arrow by
+    // (this bearing − the way the wearer's head faces), so it points the real direction to go.
+    const aheadAlong = Math.min(total, along + 12);
+    let j = seg;
+    while (j < o.line.length - 2 && o.cum[j + 1] < aheadAlong) j++;
+    const segLen = o.cum[j + 1] - o.cum[j] || 1;
+    const tt = Math.max(0, Math.min(1, (aheadAlong - o.cum[j]) / segLen));
+    const aheadPt = { lat: o.line[j].lat + (o.line[j + 1].lat - o.line[j].lat) * tt, lon: o.line[j].lon + (o.line[j + 1].lon - o.line[j].lon) * tt };
+    const here = { lat: o.line[seg].lat + (o.line[seg + 1].lat - o.line[seg].lat) * segT, lon: o.line[seg].lon + (o.line[seg + 1].lon - o.line[seg].lon) * segT };
+    emit("gps", `In ${exactDist(d)} m · ${gps}`, {
+      speak,
+      dist: { distM: d, speed: fix.speed ?? 0, acc: fix.acc, toGoM: toGo, aheadBearing: Math.round(bearing(here, aheadPt)) },
+      phoneDetail: `${view.instruction} ${view.detail} in ${exactDist(d)} m. ${exactDist(toGo)} m to ${o.to.name}.`,
+    });
+  }
+
+  // Set the current checkpoint and start the outdoor leg that hangs off it, if any.
+  function enterCheckpoint(j) {
+    s.index = j;
+    s.offRoute = null;
+    s.outdoor = null;
+    const c = cp(j);
+    if (c?.walkTo) return startOutdoor(c, j + 1);
+    if (j === route().checkpoints.length - 1) {
+      s.done = true;
+      s.endedAt = Date.now();
+    }
+  }
+
+  // Blend the last few GPS readings: newer and more accurate readings count more. Cuts jitter without
+  // lagging much (readings older than ~3 s fade out).
+  const recent = [];
+  function smooth(fix) {
+    const now = Date.now();
+    recent.push({ ...fix, ts: now });
+    while (recent.length && now - recent[0].ts > 4000) recent.shift();
+    let wsum = 0, lat = 0, lon = 0;
+    for (const r of recent) {
+      const w = Math.exp(-(now - r.ts) / 1500) / Math.max(3, r.acc ?? 30) ** 2;
+      wsum += w; lat += w * r.lat; lon += w * r.lon;
+    }
+    const acc = Math.min(fix.acc ?? 50, Math.sqrt(recent.reduce((a, r) => a + (r.acc ?? 30) ** 2, 0) / recent.length) / Math.sqrt(recent.length));
+    // Walking speed: the phone's own reading if it has one, else from how far we moved in the window.
+    let speed = Number.isFinite(fix.speed) && fix.speed >= 0 ? fix.speed : 0;
+    if (!speed && recent.length > 1) {
+      const a = recent[0], b = recent[recent.length - 1];
+      if (b.ts > a.ts) speed = Math.min(3, dist(a, b) / ((b.ts - a.ts) / 1000));
+    }
+    return { lat: lat / wsum, lon: lon / wsum, acc: Math.max(3, Math.round(acc)), speed, ts: now };
+  }
+
+  function location(raw) {
+    const fix = smooth(raw);
+    lastFix = { lat: fix.lat, lon: fix.lon, acc: fix.acc, speed: fix.speed, ts: Date.now() };
+    if (!s || s.done) return { ok: true };
+    s.fix = lastFix;
+    if (s.outdoor) {
+      updateOutdoor(s.fix);
+    } else if (((s.plan && s.plan.outdoorDest) || (s.room && s.room.outdoorDest && !s.room.done)) && s.fix.acc <= 15) {
+      s.goodFixes = (s.goodFixes ?? 0) + 1;
+      if (s.goodFixes >= 2) leavePlanForOutdoor("Outside detected (GPS)");
+    } else if (!s.offRoute && s.fix.acc <= 15) {
+      // GPS is poor indoors; two sharp fixes in a row while on an indoor leg ⇒ you've walked outside.
+      const exitIdx = route().checkpoints.findIndex((c, i) => i > s.index && c.walkTo);
+      s.goodFixes = (s.goodFixes ?? 0) + 1;
+      if (exitIdx >= 0 && s.goodFixes >= 2) {
+        s.history.push({ ts: Date.now(), result: "outside-gps", label: "Outside detected", confidence: "gps", ms: 0 });
+        enterCheckpoint(exitIdx);
+      }
+    } else {
+      s.goodFixes = 0;
+    }
+    return { ok: true };
+  }
+
+  // ---------- trip control ----------
+
+  async function start({ routeId, destination, planId, place, room, exit } = {}) {
+    if (rec) throw Object.assign(new Error("finish or cancel the recording first"), { status: 409 });
+    let r, plan = null, roomTrip = null;
+    if (room || exit) {
+      const target = exit ? { exit: true, label: "EXIT" } : parseRoom(room);
+      if (!target) throw Object.assign(new Error("Type a room number like A103"), { status: 400 });
+      roomTrip = { target, outdoorDest: destination ?? null, last: null, done: false };
+      r = { id: "_room", name: `${target.exit ? "Exit" : target.label}${destination ? ` → ${destination.name}` : ""}`, destination: destination?.name ?? (target.exit ? "Exit" : target.label), room: true, checkpoints: [], offRoute: [] };
+    } else if (planId) {
+      const meta = (await listPlans()).find((p) => p.id === planId);
+      const image = meta && (await planImage(planId));
+      if (!image) throw Object.assign(new Error("floor plan not found"), { status: 400 });
+      if (!place) throw Object.assign(new Error("pick where you're going in the building"), { status: 400 });
+      plan = { id: planId, image, target: place, outdoorDest: destination ?? null, last: null, done: false };
+      r = { id: "_plan", name: `${place}${destination ? ` → ${destination.name}` : ""}`, destination: destination?.name ?? place, plan: true, checkpoints: [], offRoute: [] };
+    } else if (routeId) {
+      const found = (await loadRoutes()).find((x) => x.id === routeId);
+      if (!found) throw Object.assign(new Error(`unknown route ${routeId}`), { status: 400 });
+      r = structuredClone(found);
+      if (destination && !r.checkpoints.some((c) => c.walkTo)) {
+        r.checkpoints[r.checkpoints.length - 1].walkTo = { ...destination, arriveRadius: 30 };
+        r.destination = destination.name;
+      }
+    } else if (destination) {
+      r = {
+        id: "_outdoor",
+        name: `To ${destination.name}`,
+        destination: destination.name,
+        outdoorOnly: true,
+        checkpoints: [{ id: "_here", mode: "outdoor", label: "Your location", arrow: "straight", instruction: "WALK", detail: "", walkTo: { ...destination, arriveRadius: 30 } }],
+        offRoute: [],
+      };
+    } else throw Object.assign(new Error("pick a destination or a recorded route"), { status: 400 });
+
+    s = { route: r, plan, planView: null, room: roomTrip, roomView: null, index: -1, offRoute: null, outdoor: null, fix: lastFix && Date.now() - lastFix.ts < 60000 ? lastFix : null, wrongTurns: 0, history: [], frames: [], startedAt: Date.now(), endedAt: null, done: false, lastCard: null, finalView: null };
+    if (roomTrip) emit("unknown", "Look at a room number", { speak: roomTrip.target.exit ? "Finding the exit. Look around for exit signs." : `Finding ${roomTrip.target.label}. Look at a room number.` });
+    else if (plan) emit("unknown", "Locating you on the floor plan", { speak: `Heading to ${place}. Look around; I'll find you on the floor plan.` });
+    else if (r.outdoorOnly) enterCheckpoint(0);
+    else emit("unknown", "Tap at a sign to verify", { speak: `Navigation started. Find the ${cp(0).label} sign and tap to verify.` });
+    return state();
+  }
+
+  function stop() {
+    if (s && !s.done) {
+      s.done = true;
+      if (s.room) s.room.done = true;
+      if (s.plan) s.plan.done = true;
+      s.endedAt = Date.now();
+      s.outdoor = null;
+      broadcast({ title: "NAVIQ", lines: ["Trip ended", "Review on your phone"], speak: "", phone_detail: "" });
+    }
+    return state();
+  }
+
+  function step(dir) {
+    if (!s || s.done) throw Object.assign(new Error("no active trip"), { status: 409 });
+    if (route().outdoorOnly || route().plan || route().room) throw Object.assign(new Error("this trip is guided automatically"), { status: 400 });
+    const total = route().checkpoints.length;
+    const prevMode = s.outdoor ? "outdoor" : s.index >= 0 ? cp(s.index).mode : null;
+    const j = Math.max(-1, Math.min(total - 1, s.index + (dir === "back" ? -1 : 1)));
+    s.history.push({ ts: Date.now(), result: "manual", label: j >= 0 ? cp(j).label : "start", dir });
+    if (j < 0) { s.index = -1; s.offRoute = null; s.outdoor = null; } else enterCheckpoint(j);
+    if (s.outdoor) return { card: s.lastCard, state: state() };
+    const c = j >= 0 ? cp(j) : null;
+    return {
+      card: emit(s.done ? "arrived" : "manual", s.done ? `Arrived: ${c.label}` : "Manual step, not verified", {
+        modeChanged: Boolean(c && prevMode && c.mode !== prevMode),
+        speak: c ? `${c.instruction}. ${c.detail}` : "",
+      }),
+      state: state(),
+    };
+  }
+
+  function leavePlanForOutdoor(why) {
+    const dest = s.plan?.outdoorDest ?? s.room?.outdoorDest;
+    if (s.plan) s.plan.done = true;
+    if (s.room) s.room.done = true;
+    s.history.push({ ts: Date.now(), result: "outside-gps", label: why, confidence: "gps", ms: 0 });
+    startOutdoor({ walkTo: { ...dest, arriveRadius: 30 } }, Infinity);
+  }
+
+  // ---------- room finding: room-number logic, no map needed ----------
+  async function roomObserve(image) {
+    inflight += 1;
+    const trip = s;
+    const seq = (s.room.seq = (s.room.seq ?? 0) + 1);
+    const frame = s.frames.push(image) - 1;
+    if (s.frames.length > MAX_FRAMES) s.frames[s.frames.length - MAX_FRAMES - 1] = null;
+    const t = s.room.target;
+    const Read = z.object({
+      rooms: z.array(z.object({ label: z.string(), position: z.enum(["left", "center", "right"]) })),
+      numbers_increase: z.enum(["left", "right", "ahead", "behind", "unknown"]),
+      signs: z.array(z.object({ text: z.string(), arrow: z.enum(["left", "right", "straight", "up", "down", "none"]), kind: z.enum(["room_range", "exit", "stairs", "elevator", "other"]) })),
+      exit: z.object({ visible: z.boolean(), position: z.enum(["left", "center", "right"]), cue: z.string(), path: z.string() }),
+      stairs: z.object({ visible: z.boolean(), position: z.enum(["left", "center", "right"]) }),
+      elevator: z.object({ visible: z.boolean(), position: z.enum(["left", "center", "right"]) }),
+      outdoors: z.boolean(),
+    });
+    const t0 = Date.now();
+    let v;
+    try {
+      // The target is deliberately NOT in the prompt, so the model can't "see" the room it's told to expect.
+      // Exits / changing floors need scene understanding (slower, smarter model); reading room numbers doesn't.
+      const needScene = t.exit || Boolean(s.room.last && s.room.last.floor !== t.floor);
+      v = await askJSON({ system: ROOM_READ_SYSTEM, prompt: "What room numbers, signs and ways out are visible?", image, schema: Read, name: "room_read", fast: !needScene, scene: needScene });
+    } catch (err) {
+      if (s === trip) {
+        s.history.push({ ts: Date.now(), result: "error", label: err.message, frame });
+        emit("unknown", `AI error: ${err.message}`.slice(0, 40));
+      }
+      throw err;
+    } finally {
+      inflight -= 1;
+    }
+    // A newer frame already answered (or the trip changed): drop this stale answer.
+    if (s !== trip || s.done || s.room.done || seq < (s.room.applied ?? 0)) return { busy: true, stale: true };
+    s.room.applied = seq;
+    // Plain code turns the signs into arrows for this target.
+    const arrowOf = (kinds, test = () => true) => v.signs.find((sg) => kinds.includes(sg.kind) && sg.arrow !== "none" && test(sg))?.arrow ?? "none";
+    const inRange = (sg) => {
+      const nums = [...sg.text.toUpperCase().matchAll(/([A-Z]{1,2})?\s*-?\s*(\d{3,4})/g)].map((m) => ({ b: m[1], n: Number(m[2]) }));
+      if (!nums.length || t.exit) return false;
+      if (nums.some((x) => x.b && x.b !== t.bldg)) return false;
+      const lo = Math.min(...nums.map((x) => x.n)), hi = Math.max(...nums.map((x) => x.n));
+      return nums.length === 1 ? lo === t.num : t.num >= lo && t.num <= hi;
+    };
+    v.target_arrow = t.exit ? arrowOf(["exit"]) : arrowOf(["room_range", "other"], inRange);
+    // Seen-by-look → arrow from where it sits in the frame; a sign's arrow wins when there is one.
+    const POS_ARROW = { left: "left", center: "straight", right: "right" };
+    v.stairs_arrow = arrowOf(["stairs"]) !== "none" ? arrowOf(["stairs"]) : v.stairs.visible ? POS_ARROW[v.stairs.position] : "none";
+    v.elevator_arrow = arrowOf(["elevator"]) !== "none" ? arrowOf(["elevator"]) : v.elevator.visible ? POS_ARROW[v.elevator.position] : "none";
+    v.exit_visible = v.exit.visible || v.signs.some((sg) => sg.kind === "exit");
+    const ms = Date.now() - t0;
+    const seen = v.rooms.map((r) => ({ ...parseRoom(r.label), position: r.position })).filter((r) => r.label);
+    const entry = { ts: Date.now(), frame, ms, sign_text: seen.map((r) => r.label).join(", "), confidence: seen.length ? "high" : "low" };
+    let view, kind = "ok", status, speak;
+
+    if (v.outdoors && s.room.outdoorDest) {
+      entry.result = "outside-gps"; entry.label = "Outside (camera)";
+      s.history.push(entry);
+      leavePlanForOutdoor("Outside (camera)");
+      return { read: v, ms, card: s.lastCard, state: state() };
+    }
+
+    const match = !t.exit && seen.find((r) => r.label === t.label);
+    if (match || (t.exit && v.outdoors)) {
+      entry.result = "arrived"; entry.label = t.label;
+      s.history.push(entry);
+      s.room.done = true;
+      if (s.room.outdoorDest && t.exit) { leavePlanForOutdoor("Out the exit"); return { read: v, ms, card: s.lastCard, state: state() }; }
+      s.done = true; s.endedAt = Date.now();
+      s.finalView = { mode: "indoor", arrow: "arrive", instruction: t.exit ? "YOU'RE OUT" : "ARRIVED", detail: t.exit ? "Outside" : `${t.label}${match.position !== "center" ? `, on your ${match.position}` : ""}` };
+      return { read: v, ms, card: emit("arrived", t.exit ? "Out of the building" : `Found ${t.label}`, { speak: t.exit ? "You're outside." : `This is ${t.label}${match.position !== "center" ? `, on your ${match.position}` : ""}.` }), state: state() };
+    }
+
+    // Reference room: the one nearest the centre of view, else the one closest to the target number.
+    const ref = seen.find((r) => r.position === "center") ?? [...seen].sort((a, b) => Math.abs(a.num - (t.num ?? 0)) - Math.abs(b.num - (t.num ?? 0)))[0];
+    const sign = (a) => a !== "none" && a !== undefined;
+
+    if (t.exit) {
+      const short = (t, n) => (t.length > n ? t.slice(0, n - 1).replace(/\s+\S*$/, "") + "…" : t);
+      const how = short(v.exit.path || v.exit.cue, 34);
+      if (v.exit.visible) {
+        const pos = v.exit.position;
+        view = { arrow: POS_ARROW[pos], instruction: pos === "center" ? "EXIT AHEAD" : `EXIT ${pos.toUpperCase()}`, detail: how || "Walk to the doors" };
+      } else if (sign(v.target_arrow)) view = { arrow: DIR_ARROW[v.target_arrow], instruction: DIR_WORD[v.target_arrow], detail: "Follow the EXIT sign" };
+      else view = { arrow: "scan", instruction: "LOOK AROUND", detail: "Turn to find doors outside" };
+      status = v.exit.visible ? short(`Exit: ${v.exit.cue || "in view"}`, 36) : ref ? `Near ${ref.label}` : "No exit in view yet";
+      kind = v.exit_visible || sign(v.target_arrow) ? "ok" : "unknown";
+    } else if (!ref) {
+      if (sign(v.target_arrow)) { view = { arrow: DIR_ARROW[v.target_arrow], instruction: DIR_WORD[v.target_arrow], detail: `Sign points to ${t.label}` }; status = "Following sign"; }
+      else { view = { arrow: "scan", instruction: "LOOK AROUND", detail: "Face a room number" }; status = "No room number in view"; kind = "unknown"; }
+    } else if (ref.bldg !== t.bldg) {
+      const a = sign(v.target_arrow) ? v.target_arrow : null;
+      view = { arrow: a ? DIR_ARROW[a] : "scan", instruction: "OTHER BUILDING", detail: `${t.label} is in building ${t.bldg}` };
+      status = `You're in building ${ref.bldg} (${ref.label})`; kind = "warn";
+    } else if (ref.floor !== t.floor) {
+      const up = t.floor > ref.floor, n = Math.abs(t.floor - ref.floor);
+      const via = sign(v.elevator_arrow) ? ["Elevator", v.elevator_arrow] : sign(v.stairs_arrow) ? ["Stairs", v.stairs_arrow] : null;
+      view = via && !["here", "up", "down"].includes(via[1])
+        ? { arrow: DIR_ARROW[via[1]], instruction: via[1] === "straight" ? `${via[0].toUpperCase()} AHEAD` : `${via[0].toUpperCase()} ${via[1].toUpperCase()}`, detail: `Go ${up ? "up" : "down"} to floor ${t.floor}` }
+        : { arrow: up ? "up" : "down", instruction: up ? "GO UPSTAIRS" : "GO DOWNSTAIRS", detail: `${n} floor${n > 1 ? "s" : ""}, to floor ${t.floor}${via ? ` · ${via[0]} here` : ""}` };
+      status = `On floor ${ref.floor} (${ref.label})`;
+    } else {
+      const doors = Math.max(1, Math.round(Math.abs(t.num - ref.num) / 2));
+      const doorsTxt = `${t.label}: about ${doors} door${doors > 1 ? "s" : ""}`;
+      if (sign(v.target_arrow)) view = { arrow: DIR_ARROW[v.target_arrow], instruction: DIR_WORD[v.target_arrow], detail: `Sign points to ${t.label}` };
+      else if (v.numbers_increase !== "unknown") {
+        const way = t.num > ref.num ? v.numbers_increase : OPPOSITE[v.numbers_increase];
+        view = { arrow: DIR_ARROW[way], instruction: DIR_WORD[way], detail: doorsTxt };
+      } else if (s.room.last && s.room.last.floor === ref.floor && s.room.last.num !== ref.num) {
+        const closer = Math.abs(t.num - ref.num) < Math.abs(t.num - s.room.last.num);
+        view = closer ? { arrow: "straight", instruction: "KEEP GOING", detail: doorsTxt } : { arrow: "back", instruction: "TURN AROUND", detail: `Wrong way · ${doorsTxt}` };
+        if (!closer) { s.wrongTurns += 1; entry.result = "wrong-turn"; }
+      } else {
+        view = { arrow: "scan", instruction: "WALK & LOOK", detail: `${t.label} is ${t.num < ref.num ? "lower" : "higher"} than ${ref.label}` };
+        kind = "unknown";
+      }
+      status = `Seeing ${ref.label}`;
+    }
+    if (ref) s.room.last = ref;
+    entry.result = entry.result ?? (ref ? "located" : "unverified");
+    entry.label = ref ? ref.label : seen.length ? "" : "no room number";
+    s.roomView = view;
+    speak = `${view.instruction.toLowerCase()}. ${view.detail}.`;
+    s.history.push(entry);
+    return { read: v, ms, card: emit(kind, status, { speak, phoneDetail: `${status}. ${view.instruction}: ${view.detail}.` }), state: state() };
+  }
+
+  async function planObserve(image) {
+    busy = true;
+    const frame = s.frames.push(image) - 1;
+    if (s.frames.length > MAX_FRAMES) s.frames[s.frames.length - MAX_FRAMES - 1] = null;
+    broadcast(buildCard("pending", "Finding you on the floor plan…"));
+    const Guide = z.object({
+      located: z.boolean(),
+      location: z.string(),
+      confidence: z.enum(["high", "medium", "low"]),
+      seen_text: z.string(),
+      arrow: z.enum(["left", "right", "straight", "back", "up", "down", "arrive"]),
+      instruction: z.string(),
+      detail: z.string(),
+      arrived: z.boolean(),
+      reason: z.string(),
+    });
+    const prompt = `Destination: ${s.plan.target}.\n${s.plan.last ? `Last known position: ${s.plan.last}.` : "No position yet."}`;
+    const t0 = Date.now();
+    let g;
+    try {
+      g = await askJSON({ system: PLAN_GUIDE_SYSTEM, prompt, images: [s.plan.image, image], schema: Guide, name: "floor_plan_step", effort: "plan" });
+    } catch (err) {
+      s.history.push({ ts: Date.now(), result: "error", label: err.message, frame });
+      emit("unknown", `AI error: ${err.message}`.slice(0, 40));
+      throw err;
+    } finally {
+      busy = false;
+    }
+    const ms = Date.now() - t0;
+    const entry = { ts: Date.now(), frame, ms, confidence: g.confidence, sign_text: g.seen_text, reason: g.reason };
+    let card;
+    if (!g.located || g.confidence === "low") {
+      entry.result = "unverified";
+      entry.label = g.seen_text ? `read "${g.seen_text}"` : "couldn't place you";
+      s.planView = { arrow: "scan", instruction: "LOOK AROUND", detail: g.detail || "Face a room number or sign" };
+      card = emit("unknown", "Can't place you yet", { speak: `I can't place you yet. ${g.detail || "Face a room number."}`, phoneDetail: g.reason });
+    } else if (g.arrived) {
+      entry.result = "arrived";
+      entry.label = s.plan.target;
+      s.history.push(entry);
+      if (s.plan.outdoorDest) {
+        leavePlanForOutdoor(`At ${s.plan.target}`);
+        return { guide: g, ms, card: s.lastCard, state: state() };
+      }
+      s.done = true;
+      s.endedAt = Date.now();
+      s.finalView = { mode: "indoor", arrow: "arrive", instruction: "ARRIVED", detail: s.plan.target };
+      card = emit("arrived", `Arrived: ${s.plan.target}`, { speak: `You've arrived at ${s.plan.target}.` });
+      return { guide: g, ms, card, state: state() };
+    } else {
+      entry.result = "located";
+      entry.label = g.location;
+      s.plan.last = g.location;
+      s.planView = { arrow: g.arrow, instruction: g.instruction.toUpperCase().slice(0, 18), detail: g.detail };
+      card = emit(g.confidence === "high" ? "ok" : "unknown", g.location.slice(0, 44), {
+        speak: `${g.instruction}. ${g.detail}.`,
+        phoneDetail: `${g.location}. ${g.reason}`,
+      });
+    }
+    s.history.push(entry);
+    return { guide: g, ms, card, state: state() };
+  }
+
+  async function observe(image, text = "") {
+    if (!s || s.done) throw Object.assign(new Error("no active trip: start one on the phone"), { status: 409 });
+    if (!image) throw Object.assign(new Error("no image"), { status: 400 });
+    if (busy) return { busy: true };
+    if (s.room && !s.room.done && !s.outdoor) {
+      if (inflight >= 2) return { busy: true };
+      return roomObserve(image);
+    }
+    if (s.plan && !s.outdoor) return planObserve(image);
+    const r = route();
+    const known = [
+      ...r.checkpoints.filter((c) => c.match).map((c) => ({ id: c.id, label: c.label, expect: c.expect })),
+      ...(r.offRoute ?? []).map((o) => ({ id: o.id, label: o.label, expect: o.expect })),
+    ];
+    if (!known.length) throw Object.assign(new Error("this trip has no signs to verify; it follows GPS"), { status: 400 });
+    busy = true;
+
+    const frame = s.frames.push(image) - 1;
+    if (s.frames.length > MAX_FRAMES) s.frames[s.frames.length - MAX_FRAMES - 1] = null;
+    const keepKind = s.offRoute ? "warn" : s.outdoor ? "gps" : s.index < 0 ? "unknown" : "ok";
+    broadcast(buildCard("pending", "Verifying sign…"));
+
+    const Verdict = z.object({
+      seen_id: z.enum([...known.map((k) => k.id), "none"]),
+      confidence: z.enum(["high", "medium", "low"]),
+      sign_text: z.string(),
+      reason: z.string(),
+    });
+    const prompt = ["Known landmarks:", ...known.map((k) => `- id "${k.id}": ${k.label}. Looks like: ${k.expect}`), text ? `\nThe wearer said: "${text}"` : ""].join("\n");
+
+    const t0 = Date.now();
+    let v;
+    try {
+      v = await askJSON({ system: VERIFY_SYSTEM, prompt, image, schema: Verdict, name: "checkpoint_verdict" });
+    } catch (err) {
+      s.history.push({ ts: Date.now(), result: "error", label: err.message, frame });
+      emit(keepKind === "ok" ? "unknown" : keepKind, `AI error: ${err.message}`.slice(0, 40));
+      throw err;
+    } finally {
+      busy = false;
+    }
+    const ms = Date.now() - t0;
+
+    // Hard rule: a landmark only counts if its sign words were actually read.
+    const landmark = r.checkpoints.find((c) => c.id === v.seen_id) ?? (r.offRoute ?? []).find((o) => o.id === v.seen_id);
+    if (landmark?.match?.length && !landmark.match.some((m) => norm(v.sign_text).includes(norm(m)))) {
+      v.reason = `Looked like ${landmark.label} but its sign text wasn't readable. ${v.reason}`;
+      v.seen_id = "none";
+    }
+
+    const entry = { ts: Date.now(), frame, ms, seen: v.seen_id, confidence: v.confidence, sign_text: v.sign_text, reason: v.reason };
+    const prevMode = s.outdoor ? "outdoor" : s.index >= 0 ? cp(s.index).mode : null;
+    const j = r.checkpoints.findIndex((c) => c.id === v.seen_id);
+    const off = (r.offRoute ?? []).find((o) => o.id === v.seen_id);
+    let card;
+
+    if (v.seen_id === "none" || v.confidence === "low") {
+      entry.result = "unverified";
+      entry.label = v.sign_text ? `read "${v.sign_text}"` : "no sign";
+      card = emit(keepKind === "ok" ? "unknown" : keepKind, "Can't verify. Get closer to a sign", {
+        speak: "I can't verify where you are. Get closer to a sign.",
+        phoneDetail: `Couldn't match a checkpoint. ${v.reason} Last confirmed: ${s.index >= 0 ? cp(s.index).label : "none yet"}.`,
+      });
+    } else if (off) {
+      entry.result = "wrong-turn";
+      entry.label = off.label;
+      s.offRoute = off.id;
+      s.wrongTurns += 1;
+      card = emit("warn", `Saw ${off.label}: off route`, {
+        speak: `Wrong way. ${off.recover}.`,
+        phoneDetail: `You're at ${off.label}, which isn't on your route. ${off.recover}.`,
+      });
+    } else {
+      const wasOff = Boolean(s.offRoute);
+      const forward = j > s.index;
+      enterCheckpoint(j);
+      const c = cp(j);
+      const modeChanged = Boolean(prevMode && (s.outdoor ? "outdoor" : c.mode) !== prevMode);
+      entry.result = s.done ? "arrived" : wasOff ? "recovered" : forward ? "verified" : "re-verified";
+      entry.label = c.label;
+      const status = s.done ? `Arrived: ${c.label}` : wasOff ? `Back on route: ${c.label}` : `Verified: ${c.label}`;
+      card = s.outdoor
+        ? s.lastCard // outdoor leg just started; its card is already showing
+        : emit(s.done ? "arrived" : "ok", status, {
+            modeChanged,
+            speak: s.done ? `You've arrived. ${c.instruction}. ${c.detail}` : `${modeChanged ? c.mode + " mode. " : ""}${c.instruction}. ${c.detail}`,
+            phoneDetail: `${status} (read "${v.sign_text}", ${v.confidence} confidence). Next: ${c.instruction.toLowerCase()}${c.detail ? ", " + c.detail : ""}.`,
+          });
+    }
+    s.history.push(entry);
+    return { verdict: v, ms, card, state: state() };
+  }
+
+  // ---------- route recorder (how indoor routes get made: walk it once, tap at each real sign) ----------
+
+  function recCard(statusText, kind = "unknown") {
+    const card = {
+      title: "RECORDING",
+      lines: [rec.name, statusText],
+      speak: "",
+      phone_detail: statusText,
+      nav: {
+        mode: "record", arrow: "scan", instruction: "RECORDING",
+        detail: `${rec.name} · ${rec.checkpoints.length} sign${rec.checkpoints.length === 1 ? "" : "s"}`,
+        kind, status: `${ICON[kind] ?? ""} ${statusText}`.trim(), dest: "", step: 0, total: 0,
+      },
+    };
+    broadcast(card);
+    return card;
+  }
+
+  function recState() {
+    if (!rec) return { recording: false };
+    return {
+      recording: true,
+      name: rec.name,
+      checkpoints: rec.checkpoints.map(({ frame, ...c }) => c),
+      offRoute: rec.offRoute.map(({ frame, ...o }) => o),
+      pending: rec.pending ? { sign_text: rec.pending.sign_text, kind: rec.pending.kind, description: rec.pending.description, frame: rec.pending.frame } : null,
+    };
+  }
+
+  function recStart(name) {
+    if (s && !s.done) stop();
+    rec = { name: String(name || "").trim() || "Recorded route", checkpoints: [], offRoute: [], pending: null, frames: [] };
+    recCard("Tap at each sign along the way");
+    return recState();
+  }
+
+  async function recSnap(image) {
+    if (!rec) throw Object.assign(new Error("not recording"), { status: 409 });
+    if (busy) return { busy: true };
+    busy = true;
+    recCard("Reading sign…", "pending");
+    const Read = z.object({
+      sign_text: z.string(),
+      kind: z.enum(["room", "exit", "stairs", "elevator", "hallway", "directory", "station", "platform", "other", "none"]),
+      description: z.string(),
+    });
+    let v;
+    try {
+      v = await askJSON({ system: READ_SYSTEM, prompt: "Read the most prominent sign in this frame.", image, schema: Read, name: "sign_read" });
+    } finally {
+      busy = false;
+    }
+    if (v.kind === "none" || !v.sign_text.trim()) {
+      recCard("No sign readable. Get closer, tap again", "warn");
+      return { read: v, state: recState() };
+    }
+    rec.pending = { ...v, frame: rec.frames.push(image) - 1 };
+    recCard(`Read "${v.sign_text}". Set direction on phone`, "ok");
+    return { read: v, state: recState() };
+  }
+
+  function recConfirm({ label, arrow = "straight", detail = "", wrongWay = false }) {
+    if (!rec?.pending) throw Object.assign(new Error("no sign captured yet: tap at a sign first"), { status: 409 });
+    const p = rec.pending;
+    const text = String(label || p.sign_text).trim();
+    const id = `${slug(text)}-${rec.checkpoints.length + rec.offRoute.length + 1}`;
+    if (wrongWay) {
+      rec.offRoute.push({ id, label: text, expect: p.description, match: matchTokens(text), recover: String(detail).trim() || "Turn around", frame: p.frame });
+    } else {
+      const mode = ["station", "platform"].includes(p.kind) ? "subway" : "indoor";
+      const svgArrow = arrow === "elevator" ? "up" : arrow;
+      rec.checkpoints.push({ id, mode, label: text, expect: p.description, match: matchTokens(text), arrow: svgArrow, instruction: INSTRUCTION[arrow] ?? "GO STRAIGHT", detail: String(detail).trim(), frame: p.frame });
+    }
+    rec.pending = null;
+    recCard(`Saved "${text}". Walk on, tap the next sign`, "ok");
+    return recState();
+  }
+
+  function recWalk(place) {
+    if (!rec) throw Object.assign(new Error("not recording"), { status: 409 });
+    const last = rec.checkpoints[rec.checkpoints.length - 1];
+    if (!last) throw Object.assign(new Error("record at least one sign (e.g. the exit) before the outdoor walk"), { status: 409 });
+    last.walkTo = { name: place.name, lat: place.lat, lon: place.lon, arriveRadius: 30 };
+    recCard(`Outdoor walk to ${place.name} added`, "ok");
+    return recState();
+  }
+
+  function recUndo() {
+    if (!rec) throw Object.assign(new Error("not recording"), { status: 409 });
+    if (rec.pending) rec.pending = null;
+    else rec.checkpoints.pop();
+    recCard("Removed last sign", "unknown");
+    return recState();
+  }
+
+  async function recSave() {
+    if (!rec) throw Object.assign(new Error("not recording"), { status: 409 });
+    if (!rec.checkpoints.length) throw Object.assign(new Error("no signs recorded yet"), { status: 400 });
+    const routes = await loadRoutes();
+    const cps = rec.checkpoints.map(({ frame, ...c }) => c);
+    const walk = cps.find((c) => c.walkTo);
+    const r = {
+      id: `${slug(rec.name)}-${Date.now().toString(36)}`,
+      name: rec.name,
+      destination: walk ? walk.walkTo.name : cps[cps.length - 1].label,
+      recordedAt: new Date().toISOString(),
+      checkpoints: cps,
+      offRoute: rec.offRoute.map(({ frame, ...o }) => o),
+    };
+    routes.push(r);
+    await saveRoutes(routes);
+    rec = null;
+    broadcast({ title: "ROUTE SAVED", lines: [r.name, `${cps.length} signs`], speak: "", phone_detail: "" });
+    return r;
+  }
+
+  function recCancel() {
+    rec = null;
+    broadcast({ title: "NAVIQ", lines: ["Recording cancelled"], speak: "", phone_detail: "" });
+    return recState();
+  }
+
+  async function deleteRoute(id) {
+    const routes = (await loadRoutes()).filter((r) => r.id !== id);
+    await saveRoutes(routes);
+    return routes;
+  }
+
+  function setHeading(h) {
+    if (Number.isFinite(h)) heading = { deg: ((h % 360) + 360) % 360, ts: Date.now() };
+    return { ok: true };
+  }
+
+  return {
+    setHeading,
+    get heading() { return heading; },
+    loadRoutes, deleteRoute, listPlans, addPlan, planImage, deletePlan,
+    start, stop, step, observe, location, state,
+    recStart, recSnap, recConfirm, recWalk, recUndo, recSave, recCancel, recState,
+    frame: (i) => s?.frames[i] ?? null,
+    recFrame: (i) => rec?.frames[i] ?? null,
+    get active() { return Boolean(s && !s.done); },
+    get recording() { return Boolean(rec); },
+  };
+}
