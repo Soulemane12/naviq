@@ -48,6 +48,17 @@
   .see h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 4px; }
   .chips span { display: inline-block; margin: 0 6px 6px 0; padding: 3px 8px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); font-size: 13px; }
   .err { color: var(--warn); font-size: 13px; }
+  .navb { margin: 0 0 12px; padding: 12px 14px; border-radius: 12px; background: var(--accent); color: #fff; }
+  .navb b { display: block; font-size: 22px; letter-spacing: 0.02em; }
+  .navb span { font-size: 15px; opacity: 0.92; }
+  .search { display: flex; gap: 8px; margin: 12px 0 8px; }
+  .search input { flex: 1; min-width: 0; min-height: 46px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); font: inherit; font-size: 16px; }
+  .search button { flex: 0 0 auto; padding: 0 18px; }
+  .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .quick button { flex: 0 0 auto; min-height: 36px; padding: 0 12px; font-weight: 500; font-size: 14px; border-radius: 999px; }
+  .cand { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 4; stroke-dasharray: 6 5; }
+  .target-ring { fill: none; stroke: var(--ok); stroke-width: 6; }
+  .target-lbl { fill: var(--ok); font-size: 17px; font-weight: 700; paint-order: stroke; stroke: var(--card); stroke-width: 4px; }
 </style>
 </head>
 <body>
@@ -56,6 +67,15 @@
     <h1>Where am I</h1>
     <span class="sub" id="bldg">City Tech</span>
   </header>
+
+  <form class="search" id="go" autocomplete="off">
+    <input id="q" list="dests" placeholder="Where to? A103, bathroom, exit…" enterkeyhint="go">
+    <datalist id="dests"></datalist>
+    <button class="primary" type="submit">Go</button>
+  </form>
+  <div class="quick" id="quick"></div>
+
+  <div class="navb" id="navb" hidden><b id="navi"></b><span id="navd"></span></div>
 
   <div class="status" id="status"><b id="where">Not tracking</b><div class="meta" id="meta">Tap “Start tracking”, then look at a room number.</div></div>
 
@@ -100,6 +120,8 @@ function build(floor, wide) {
   }
   el("polyline", { id: "route", class: "route", points: "" }, svg);
   el("polyline", { id: "trail", class: "trail", points: "" }, svg);
+  el("g", { id: "targets" }, svg);
+  el("g", { id: "cands" }, svg);
   const shown = new Set();
   for (const n of nodes) {
     if (n.kind === "corridor") continue;
@@ -143,10 +165,33 @@ function render(p) {
   $("trail").setAttribute("points", pts(trip ? trip.trailPath || trip.trail.map((t) => t.id) : []));
   $("route").setAttribute("points", trip && trip.kind !== "track" ? pts(trip.path) : "");
 
+  // Placed at a room with two doors and can't yet tell which: show both, dashed.
+  const cg = $("cands"); cg.innerHTML = "";
+  const cands = !at && trip && trip.candidates ? trip.candidates.map((id) => byId[id]).filter((n) => n && n.floor === floor) : [];
+  for (const n of cands) el("circle", { cx: n.x, cy: n.y, r: 16, class: "cand" }, cg);
+
+  // Destination: green rings on its doors/spots.
+  const tg = $("targets"); tg.innerHTML = "";
+  if (trip && trip.kind !== "track") {
+    let labelled = false;
+    for (const id of trip.targetNodes || []) {
+      const n = byId[id];
+      if (!n || n.floor !== floor) continue;
+      el("circle", { cx: n.x, cy: n.y, r: 18, class: "target-ring" }, tg);
+      if (!labelled) { const t = el("text", { x: n.x + 22, y: n.y + 6, class: "target-lbl" }, tg); t.textContent = trip.target; labelled = true; }
+    }
+  }
+  const nb = $("navb");
+  if (p.nav && trip && trip.kind !== "track") { nb.hidden = false; $("navi").textContent = p.nav.instruction; $("navd").textContent = p.nav.detail || ""; }
+  else nb.hidden = true;
+
   const st = $("status");
   if (!trip) {
     st.className = "status"; $("where").textContent = "Not tracking";
-    $("meta").textContent = "Tap “Start tracking”, then look at a room number.";
+    $("meta").textContent = "Search a destination, or tap “Start tracking”, then look at a room number.";
+  } else if (!at && cands.length) {
+    st.className = "status stale"; $("where").textContent = `At ${cands[0].label} · one of ${cands.length} doors`;
+    $("meta").textContent = "Look at the next room number or sign to pin down which door.";
   } else if (!at) {
     st.className = "status stale"; $("where").textContent = "Finding you…";
     $("meta").textContent = "Look at a room number (like A105) for a second.";
@@ -164,7 +209,7 @@ function render(p) {
 
   const r = p.read, chips = $("chips");
   chips.innerHTML = "";
-  const items = r ? [...r.rooms.map((x) => `${x.label} · ${x.position}${x.close ? " · close" : ""}`), ...r.places.map((x) => `${x.kind.replace("_", " ")} · ${x.position}${x.close ? " · close" : ""}`)] : [];
+  const items = r ? [...r.rooms.map((x) => `${x.label} · ${x.position}${x.close ? " · close" : ""}`), ...r.places.map((x) => `${x.kind.replace("_", " ")} · ${x.position}${x.close ? " · close" : ""}`), ...(r.signs || []).map((x) => `sign “${x.text.replace(/\s+/g, " ")}”${x.arrow && x.arrow !== "none" ? " " + x.arrow : ""}${x.close ? " · close" : ""}`)] : [];
   for (const t of items.length ? items : [r ? "nothing recognised" : "no recent frame"]) { const s = document.createElement("span"); s.textContent = t; chips.appendChild(s); }
 }
 
@@ -182,7 +227,15 @@ $("frame").onload = () => { $("frame").style.visibility = "visible"; };
 setInterval(() => { $("frame").src = "/api/live/frame?ts=" + Date.now(); }, 1500);
 
 const post = (url, body) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) }).then((r) => r.json());
-$("start").onclick = () => post("/api/naviq/start", { room: "where" }).catch((e) => ($("err").textContent = e.message));
+const go = (room) => post("/api/naviq/start", { room }).then((r) => { $("err").textContent = r && r.error ? r.error : ""; }).catch((e) => ($("err").textContent = e.message));
+$("start").onclick = () => go("where");
+$("go").onsubmit = (e) => { e.preventDefault(); const q = $("q").value.trim(); if (q) { go(q); $("q").blur(); } };
+for (const q of ["A103", "A105", "A104", "A106", "Bathroom", "Elevator", "Exit"]) {
+  const b = document.createElement("button"); b.type = "button"; b.textContent = q; b.onclick = () => { $("q").value = q; go(q); }; $("quick").appendChild(b);
+}
+fetch("/api/indoor/places").then((r) => r.json()).then((d) => {
+  for (const p of d.places || []) { const o = document.createElement("option"); o.value = p.label; $("dests").appendChild(o); }
+}).catch(() => {});
 $("stop").onclick = () => post("/api/naviq/stop").catch(() => {});
 $("reset").onclick = () => post("/api/heading", { reset: true }).catch(() => {});
 poll();
