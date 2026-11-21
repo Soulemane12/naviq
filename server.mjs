@@ -283,7 +283,9 @@ function logStep(src, image, out) {
 }
 
 const kb = (dataUrl) => (dataUrl ? Math.round((dataUrl.length * 3) / 4 / 1024) : 0);
-const STATIC = { "/": "public/phone.html", "/hud": "public/hud.html", "/where": "public/where.html" };
+// One phone page (user request: the two phone UIs fought over the trip): "/" is NAVIQ (inside + outside boxes);
+// the earlier phone page stays reachable at /classic.
+const STATIC = { "/": "public/where.html", "/classic": "public/phone.html", "/hud": "public/hud.html", "/where": "public/where.html" };
 
 // Requests through the Cloudflare tunnel carry cf-* headers; local ones (laptop, glasses over adb) don't.
 function authorized(req, url) {

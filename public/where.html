@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>NAVIQ Live</title>
+<title>NAVIQ</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <style>
   :root {
@@ -60,6 +60,15 @@
   .dial .k { color: var(--muted); font-size: 13px; }
   .dial .wrong { color: var(--warn); font-weight: 700; }
   .me-icon { width: 90px; height: 90px; }
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 4px; margin: 12px 0; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  .tab { min-height: 42px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-weight: 600; }
+  .tab.on { background: var(--accent); color: #fff; }
+  .box { padding: 12px; border-radius: 14px; border: 2px solid var(--line); margin-bottom: 12px; background: var(--card); }
+  .box.inside { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .box.outside { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+  .box .status, .box .map { background: var(--bg); }
+  .boxh { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; display: flex; justify-content: space-between; gap: 8px; }
+  .navb small { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; opacity: .8; }
   .navb { margin: 0 0 12px; padding: 12px 14px; border-radius: 12px; background: var(--accent); color: #fff; }
   .navb b { display: block; font-size: 22px; letter-spacing: 0.02em; }
   .navb span { font-size: 15px; opacity: 0.92; }
@@ -80,24 +89,35 @@
 <body>
 <main>
   <header>
-    <h1>NAVIQ Live</h1>
-    <span class="sub" id="bldg">City Tech</span>
+    <h1>NAVIQ</h1>
+    <span class="sub" id="sens">Sensors off · tap any button</span>
   </header>
 
-  <form class="search" id="go" autocomplete="off">
-    <input id="q" list="dests" placeholder="Where to? A103, bathroom, exit…" enterkeyhint="go">
-    <datalist id="dests"></datalist>
-    <button class="primary" type="submit">Go</button>
-  </form>
-  <div class="quick" id="quick"></div>
-  <div class="results" id="results"></div>
+  <div class="navb" id="navb" hidden><small>Glasses say</small><b id="navi"></b><span id="navd"></span></div>
 
-  <div class="navb" id="navb" hidden><b id="navi"></b><span id="navd"></span></div>
+  <div class="tabs" role="tablist">
+    <button type="button" id="tabIn" class="tab on" role="tab">Inside City Tech</button>
+    <button type="button" id="tabOut" class="tab" role="tab">Outside</button>
+  </div>
 
-  <div class="status" id="status"><b id="where">Not tracking</b><div class="meta" id="meta">Tap “Start tracking”, then look at a room number.</div></div>
+  <section class="box inside" id="boxIn">
+    <h2 class="boxh">Inside City Tech <span class="sub" id="bldg"></span></h2>
+    <div class="quick" id="quick"></div>
+    <div class="status" id="status"><b id="where">Not tracking</b><div class="meta" id="meta">Pick a room, or “Where am I”, then look at a room number.</div></div>
+    <div class="map" id="pmap"><svg id="svg" viewBox="0 0 100 40" aria-label="Floor plan with your position"></svg></div>
+  </section>
 
-  <div class="map" id="pmap"><svg id="svg" viewBox="0 0 100 40" aria-label="Floor plan with your position"></svg></div>
-  <div id="omap" hidden></div>
+  <section class="box outside" id="boxOut" hidden>
+    <h2 class="boxh">Outside</h2>
+    <form class="search" id="go" autocomplete="off">
+      <input id="q" list="dests" placeholder="Address or place (Jay St MetroTech)" enterkeyhint="go">
+      <datalist id="dests"></datalist>
+      <button class="primary" type="submit">Go</button>
+    </form>
+    <div class="results" id="results"></div>
+    <div class="status" id="ostatus"><b id="owhere">No outdoor trip</b><div class="meta" id="ometa">Search an address above.</div></div>
+    <div id="omap"></div>
+  </section>
 
   <div class="dial">
     <svg viewBox="-60 -60 120 120" aria-label="Which way you face vs the route">
@@ -109,16 +129,14 @@
     </svg>
     <div>
       <b id="dTitle">Facing: —</b>
-      <div class="k" id="dSrc">No compass reading from the glasses yet</div>
+      <div class="k" id="dSrc">No compass reading yet</div>
       <div class="k" id="dRouteTxt"></div>
     </div>
   </div>
 
   <div class="row">
-    <button class="primary" id="start">Start tracking</button>
-    <button id="stop">Stop</button>
+    <button id="stop">Stop trip</button>
     <button id="reset">Reset compass</button>
-    <button id="pcomp">Use phone sensors</button>
   </div>
 
   <div class="see">
@@ -133,6 +151,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
 const $ = (id) => document.getElementById(id);
+let manualTab = 0, lastGps = null; // declared first: used by handlers that can run during page setup
 const NS = "http://www.w3.org/2000/svg";
 let plan = null, built = false, byId = {};
 const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
@@ -228,7 +247,7 @@ function render(p) {
   const st = $("status");
   if (!trip) {
     st.className = "status"; $("where").textContent = "Not tracking";
-    $("meta").textContent = "Search a destination, or tap “Start tracking”, then look at a room number.";
+    $("meta").textContent = "Pick a room, or “Where am I”, then look at a room number.";
   } else if (trip.est && !at) {
     st.className = "status ok"; $("where").textContent = `Walking · ${trip.est.steps} steps`;
     $("meta").textContent = `from ${cands.length ? cands[0].label : "the last place seen"} · dot follows your steps until the next room number`;
@@ -283,13 +302,13 @@ function meIcon(face) {
   const cone = face == null ? "" : `<path d="M45 45 L28 6 A40 40 0 0 1 62 6 Z" fill="rgba(31,111,235,.25)" stroke="#1f6feb" stroke-width="1.5" transform="rotate(${face} 45 45)"/>`;
   return L.divIcon({ className: "", iconSize: [90, 90], iconAnchor: [45, 45], html: `<svg class="me-icon" viewBox="0 0 90 90">${cone}<circle cx="45" cy="45" r="9" fill="#1f6feb" stroke="#fff" stroke-width="3"/></svg>` });
 }
+function initOmap() {
+  omap = L.map("omap", { zoomControl: false }).setView(lastGps ? [lastGps.lat, lastGps.lon] : [40.6955, -73.9867], 17);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(omap);
+  omap.on("dragstart", () => { oFollow = false; });
+}
 function renderOutdoor(card, st) {
-  $("pmap").hidden = true; $("omap").hidden = false;
-  if (!omap) {
-    omap = L.map("omap", { zoomControl: false });
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(omap);
-    omap.on("dragstart", () => { oFollow = false; });
-  }
+  if (!omap) initOmap();
   setTimeout(() => omap.invalidateSize(), 0);
   const line = (st.outdoor.line || []).map((p) => [p.lat, p.lon]);
   const key = line.length + ":" + (line[0] || "") + (line[line.length - 1] || "");
@@ -308,10 +327,10 @@ function renderOutdoor(card, st) {
   }
   const nb = $("navb");
   nb.hidden = false; $("navi").textContent = n.instruction || card.title || ""; $("navd").textContent = n.detail || "";
-  const stc = $("status");
+  const stc = $("ostatus");
   stc.className = "status " + (n.wrongWay ? "stale" : "ok");
-  $("where").textContent = `To ${st.outdoor.to ? st.outdoor.to.name : st.destination}`;
-  $("meta").textContent = [st.outdoor.remaining != null ? `${Math.round(st.outdoor.remaining)} m left` : null, st.fix ? `GPS ±${Math.round(st.fix.acc)} m` : "waiting for phone GPS", n.wrongWay ? "facing the wrong way" : null].filter(Boolean).join(" · ");
+  $("owhere").textContent = `To ${st.outdoor.to ? st.outdoor.to.name : st.destination}`;
+  $("ometa").textContent = [st.outdoor.remaining != null ? `${Math.round(st.outdoor.remaining)} m left` : null, st.fix ? `GPS ±${Math.round(st.fix.acc)} m` : "waiting for phone GPS", n.wrongWay ? "facing the wrong way" : null].filter(Boolean).join(" · ");
   dial(face, n.facing ? `from ${n.facing.src}` : "", Number.isFinite(n.aheadBearingTrue) ? n.aheadBearingTrue : n.routeBearing);
   $("chips").innerHTML = "<span>outdoors: camera not used</span>";
 }
@@ -321,9 +340,13 @@ async function poll() {
     const [cr, sr] = await Promise.all([fetch("/api/state", { cache: "no-store" }), fetch("/api/naviq/state", { cache: "no-store" })]);
     if (!cr.ok || !sr.ok) throw new Error("server " + (cr.ok ? sr.status : cr.status));
     const card = await cr.json(), st = await sr.json();
-    if (st.active && st.outdoor) renderOutdoor(card, st);
+    const outdoorTrip = st.active && st.outdoor;
+    // The page follows the trip: outdoor trip → Outside box, indoor trip → Inside box (unless you just switched).
+    if (st.active && Date.now() - manualTab > 15000) showTab(outdoorTrip ? "out" : "in");
+    if (!outdoorTrip) { $("owhere").textContent = "No outdoor trip"; $("ometa").textContent = lastGps ? `GPS ±${Math.round(lastGps.acc)} m · search an address above` : "Search an address above."; $("ostatus").className = "status"; }
+    if (!st.active) $("navb").hidden = true;
+    if (outdoorTrip) renderOutdoor(card, st);
     else {
-      $("pmap").hidden = false; $("omap").hidden = true;
       const r = await fetch("/api/indoor/plan", { cache: "no-store" });
       if (!r.ok) throw new Error("server " + r.status);
       const p = await r.json();
@@ -342,8 +365,7 @@ setInterval(() => { $("frame").src = "/api/live/frame?ts=" + Date.now(); }, 1500
 
 const post = (url, body) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) }).then((r) => r.json());
 const go = (room) => post("/api/naviq/start", { room }).then((r) => { $("err").textContent = r && r.error ? r.error : ""; }).catch((e) => ($("err").textContent = e.message));
-const goTo = (d) => post("/api/naviq/start", { destination: { name: d.name, lat: d.lat, lon: d.lon } }).then((r) => { $("err").textContent = r && r.error ? r.error : ""; $("results").innerHTML = ""; }).catch((e) => ($("err").textContent = e.message));
-$("start").onclick = () => go("where");
+const goTo = (d) => (ensureSensors(), manualTab = 0, post("/api/naviq/start", { destination: { name: d.name, lat: d.lat, lon: d.lon } }).then((r) => { $("err").textContent = r && r.error ? r.error : ""; $("results").innerHTML = ""; }).catch((e) => ($("err").textContent = e.message)));
 // Rooms and places inside City Tech start an indoor trip; anything else is an address or place outside.
 let indoorNames = [];
 const isIndoor = (q) => /^\s*[a-z]{1,2}\s*-?\s*\d{3,4}(\.\d+)?\s*$/i.test(q) || /^(where( am i)?|track|exit|way out|bath ?rooms?|rest ?rooms?|toilets?|men'?s|women'?s|elevators?|lifts?|escalators?|stairs?|theat(er|re)|gym)$/i.test(q.trim()) || indoorNames.includes(q.trim().toLowerCase());
@@ -362,17 +384,18 @@ async function search(q) {
     if (!box.children.length) box.innerHTML = "<span class='sub'>No places found</span>";
   } catch (e) { $("results").innerHTML = ""; $("err").textContent = "Search: " + e.message; }
 }
-$("go").onsubmit = (e) => { e.preventDefault(); const q = $("q").value.trim(); if (q) { search(q); $("q").blur(); } };
-$("q").placeholder = "Room (A103), bathroom, exit, or an address…";
-for (const q of ["A103", "A105", "A104", "A106", "Bathroom", "Elevator", "Exit"]) {
-  const b = document.createElement("button"); b.type = "button"; b.textContent = q; b.onclick = () => { $("q").value = q; go(q); }; $("quick").appendChild(b);
+$("go").onsubmit = (e) => { e.preventDefault(); ensureSensors(); const q = $("q").value.trim(); if (q) { search(q); $("q").blur(); } };
+
+for (const q of ["Where am I", "A103", "A105", "A104", "A106", "Bathroom", "Elevator", "Exit"]) {
+  const b = document.createElement("button"); b.type = "button"; b.textContent = q;
+  b.onclick = () => { ensureSensors(); manualTab = 0; go(q === "Where am I" ? "where" : q); }; $("quick").appendChild(b);
 }
 fetch("/api/indoor/places").then((r) => r.json()).then((d) => {
   for (const p of d.places || []) { const o = document.createElement("option"); o.value = p.label; $("dests").appendChild(o); indoorNames.push(p.label.toLowerCase()); }
 }).catch(() => {});
 // Destination in the link: …/where?t=TOKEN&to=Jay%20St%20MetroTech
 const toParam = new URLSearchParams(location.search).get("to");
-if (toParam) { $("q").value = toParam; setTimeout(() => search(toParam), 300); }
+if (toParam) { $("q").value = toParam; setTimeout(() => { if (!isIndoor(toParam)) showTab("out", true); search(toParam); }, 300); }
 $("stop").onclick = () => post("/api/naviq/stop").catch(() => {});
 $("reset").onclick = () => post("/api/heading", { reset: true }).catch(() => {});
 
@@ -389,7 +412,7 @@ function onOrient(e) {
   if ((moved && now - pSentAt > 300) || now - pSentAt > 1500) {
     pLast = h; pSentAt = now;
     post("/api/heading/phone", { h }).catch(() => {});
-    $("pcomp").textContent = `Sensors on · ${Math.round(h)}° · ${totalSteps} steps`;
+    $("sens").textContent = `Compass ${Math.round(h)}° · ${totalSteps} steps${lastGps ? ` · GPS ±${Math.round(lastGps.acc)} m` : ""}`;
   }
 }
 // Steps: peaks in the phone's acceleration (walking bounce), at most one every 300 ms.
@@ -403,15 +426,17 @@ function onMotion(e) {
 }
 setInterval(() => { if (pendingSteps) { const n = pendingSteps; pendingSteps = 0; post("/api/steps", { n }).catch(() => {}); } }, 1000);
 // GPS for outdoor trips started from this page (same format as the main phone page).
-let lastGps = null, gpsWatch = null;
+let gpsWatch = null;
 function startGps() {
   if (gpsWatch != null || !navigator.geolocation) return;
   gpsWatch = navigator.geolocation.watchPosition((p) => {
-    const c = p.coords; lastGps = { lat: c.latitude, lon: c.longitude };
+    const c = p.coords; lastGps = { lat: c.latitude, lon: c.longitude, acc: c.accuracy };
     post("/api/naviq/loc", { lat: c.latitude, lon: c.longitude, acc: c.accuracy, speed: c.speed == null ? undefined : c.speed, sampleAt: p.timestamp }).catch(() => {});
   }, (e) => { $("err").textContent = "GPS: " + e.message; }, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
 }
-$("pcomp").onclick = async () => {
+let sensorsAsked = false;
+async function ensureSensors() {
+  if (sensorsAsked) return; sensorsAsked = true;
   try {
     if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
       const r = await DeviceOrientationEvent.requestPermission();
@@ -423,9 +448,21 @@ $("pcomp").onclick = async () => {
       window.addEventListener("devicemotion", onMotion); pOn = true;
     }
     startGps();
-    $("pcomp").textContent = "Phone sensors on"; $("pcomp").className = "primary";
+    $("sens").textContent = "Compass · steps · GPS on";
   } catch (e) { $("err").textContent = "Sensors: " + e.message; }
-};
+}
+// Tabs
+function showTab(which, manual) {
+  const out = which === "out";
+  $("boxIn").hidden = out; $("boxOut").hidden = !out;
+  $("tabIn").className = "tab" + (out ? "" : " on"); $("tabOut").className = "tab" + (out ? " on" : "");
+  if (manual) manualTab = Date.now();
+  if (out && omap) setTimeout(() => omap.invalidateSize(), 0);
+  if (out && !omap) initOmap();
+}
+$("tabIn").onclick = () => { ensureSensors(); showTab("in", true); };
+$("tabOut").onclick = () => { ensureSensors(); showTab("out", true); };
+startGps(); // GPS doesn't need a tap; compass/steps do (iPhone asks on the first button you press)
 poll();
 </script>
 </body>
