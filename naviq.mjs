@@ -645,10 +645,10 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   // ---------- indoor dead reckoning: real steps from the phone's motion sensor move the dot along the plan ----------
   // Between recognised places (room plaques, signs) the dot walks along the hallway the way they face, snapped
   // to the plan's corridors. Each new confirmed place snaps it back and teaches the stride (plan px per step).
-  // Stride in plan px per step. Measured by the wearer: 61 steps from A103's door to the turn at the elevators
-  // (428 plan px along the hallway) = 7.0 px/step. Refined by later walks, saved across restarts.
+  // Stride in plan px per step. Measured by the wearer: 41 steps from A103's door to the turn at the elevators
+  // (428 plan px along the straight hallway) = 10.4 px/step. Refined by later walks, saved across restarts.
   const strideFile = path.join(path.dirname(routesFile), "stride.json");
-  const stride = { px: 7.0, n: 1 };
+  const stride = { px: 10.4, n: 1 };
   try { Object.assign(stride, JSON.parse(fsSync.readFileSync(strideFile, "utf8"))); } catch {}
   const saveStride = () => fs.writeFile(strideFile, JSON.stringify(stride) + "\n").catch(() => {});
   function trueFacingNow() {
@@ -691,6 +691,30 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     }
     return { ok: true, steps: E.steps };
   }
+  // From the step estimate: plan distance to the next turn (or the destination) along the route.
+  function stepGuide(m, R, targets) {
+    const E = R.est;
+    if (!E || E.anchor !== R.at || !E.steps) return null;
+    const from = E.b ?? E.a, p = indoor.shortestPath(m, from, targets);
+    if (!p) return null;
+    let dist = 0, curB = null, turn = null;
+    if (E.b) { const A = m.byId[E.a], B = m.byId[E.b]; dist = Math.max(0, Math.hypot(A.x - B.x, A.y - B.y) - E.d); curB = indoor.planBearing(m, E.a, E.b); }
+    for (let i = 0; i < p.length - 1; i++) {
+      const b = indoor.planBearing(m, p[i], p[i + 1]);
+      if (b == null) { turn = { at: p[i], hop: true }; break; }
+      if (curB == null) curB = b;
+      const diff = indoor.turnAngle(curB, b);
+      const A = m.byId[p[i]], B = m.byId[p[i + 1]], seg = Math.hypot(A.x - B.x, A.y - B.y);
+      if (Math.abs(diff) >= 30) {
+        // A short stub into the destination door is "it's on your right", not a turn.
+        turn = { at: p[i], diff, finalStub: i + 1 === p.length - 1 && seg < 45 };
+        break;
+      }
+      dist += seg;
+    }
+    return { dist, steps: Math.max(0, Math.round(dist / stride.px)), turn };
+  }
+
   function estPosition(m, R) {
     const E = R?.est;
     if (!E || E.anchor !== R.at || !E.steps) return null;
@@ -1130,6 +1154,23 @@ export function createNav({ routesFile, askJSON, broadcast }) {
             else {
               if (g.arrow !== "straight") g = { ...g, arrow: "straight", instruction: "GO STRAIGHT", spoken: `Go straight. ${g.detail}.` };
               g.locked = true; // the HUD shows a plain straight arrow (no drifting compass rotation)
+            }
+          }
+        }
+        // Walking with the phone counting steps: guide from where the steps put them, with a countdown
+        // ("GO STRAIGHT · 12 steps, then right at the elevators" → "TURN RIGHT at the elevators").
+        if (g && !g.arrived && g.arrow === "straight") {
+          const sg = stepGuide(t.model, R, t.nodes);
+          if (sg) {
+            const n = sg.steps, name = (x) => { const nd = t.model.byId[x]; return (nd.label ?? nd.near ?? nd.room ?? "the corridor"); };
+            if (sg.turn && !sg.turn.finalStub) {
+              const dir = sg.turn.hop ? null : sg.turn.diff > 0 ? "right" : "left";
+              if (n <= 1) g = { ...g, arrow: dir ?? "up", instruction: dir ? `TURN ${dir.toUpperCase()}` : "TAKE ELEVATOR", detail: `at ${name(sg.turn.at)}`, spoken: dir ? `Turn ${dir} now, at ${name(sg.turn.at)}.` : `Take the elevator.`, locked: true };
+              else g = { ...g, arrow: "straight", instruction: "GO STRAIGHT", detail: `${n} steps, then ${dir ?? "the elevator"} at ${name(sg.turn.at)}`, spoken: `Go straight. ${n} steps, then ${dir ?? "the elevator"} at ${name(sg.turn.at)}.`, locked: true };
+            } else {
+              const side = sg.turn?.finalStub ? (sg.turn.diff > 0 ? "on your right" : "on your left") : "ahead";
+              if (n <= 1) g = { ...g, arrow: "straight", instruction: "ARRIVING", detail: `${t.label} ${side}`, spoken: `${t.label} ${side}.`, locked: true };
+              else g = { ...g, arrow: "straight", instruction: "GO STRAIGHT", detail: `${n} steps, ${t.label} ${side}`, spoken: `Go straight. ${n} steps, ${t.label} ${side}.`, locked: true };
             }
           }
         }
