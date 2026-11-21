@@ -20,21 +20,19 @@
   /* phone: a 390×844 page scaled to the column height */
   .phone { position: relative; border-radius: 38px; border: 10px solid #1d222b; background: #000; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.5); flex: 1; }
   .phone iframe { position: absolute; top: 0; left: 0; width: 390px; height: 844px; border: 0; transform-origin: 0 0; }
-  .right { display: grid; grid-template-rows: 1fr 1fr; gap: 16px; min-height: 0; }
-  .pane { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 12px; display: flex; flex-direction: column; min-height: 0; }
+  .right { display: flex; min-height: 0; min-width: 0; }
+  .pane { position: relative; flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 12px; display: flex; flex-direction: column; min-height: 0; }
   .screen { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
-  .hudbox { position: relative; aspect-ratio: 4 / 3; height: 100%; max-width: 100%; background: #000; border-radius: 10px; overflow: hidden; outline: 2px solid #1f3b29; }
-  .hudbox iframe { position: absolute; top: 0; left: 0; width: 640px; height: 480px; border: 0; transform-origin: 0 0; pointer-events: none; }
-  .cam { display: grid; grid-template-columns: auto 260px; gap: 14px; flex: 1; min-height: 0; }
-  .cambox { position: relative; aspect-ratio: 4 / 3; height: 100%; max-width: 100%; background: #000; border-radius: 10px; overflow: hidden; }
-  .cambox img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .cambox .age { position: absolute; left: 10px; bottom: 10px; background: rgba(0,0,0,.6); padding: 2px 8px; border-radius: 6px; font-size: 12px; color: #fff; }
-  .reads { overflow: auto; }
-  .reads h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 6px; }
-  .chip { display: inline-block; margin: 0 6px 6px 0; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 13px; }
+  /* camera frame underneath, HUD on top with "screen" blending: the HUD's black turns see-through like the M6 */
+  .view { position: relative; aspect-ratio: 4 / 3; height: 100%; max-width: 100%; background: #000; border-radius: 12px; overflow: hidden; }
+  .view img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; filter: brightness(.8); }
+  .view iframe { position: absolute; top: 0; left: 0; width: 640px; height: 480px; border: 0; transform-origin: 0 0; pointer-events: none; mix-blend-mode: screen; }
+  .view .age { position: absolute; right: 10px; bottom: 10px; background: rgba(0,0,0,.6); padding: 2px 8px; border-radius: 6px; font-size: 12px; color: #fff; }
+  .strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; min-height: 30px; }
+  .strip .k { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .chip { display: inline-block; margin: 0 6px 0 0; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 13px; }
   .chip.room { border-color: var(--accent); }
   .chip.place { border-color: #3fb950; }
-  .say { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0f2a1a; color: var(--green); font-family: ui-monospace, Menlo, monospace; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -49,18 +47,17 @@
   </section>
   <section class="right">
     <div class="pane">
-      <p class="label"><span>Glasses HUD</span><span>what the wearer sees</span></p>
-      <div class="screen"><div class="hudbox" id="hudbox"><iframe id="hudFrame" title="Glasses HUD"></iframe></div></div>
-    </div>
-    <div class="pane">
-      <p class="label"><span>Glasses camera</span><span>what NAVIQ reads</span></p>
-      <div class="cam">
-        <div class="cambox" id="cambox"><img id="cam" alt="Glasses camera"><span class="age" id="age">waiting for camera…</span></div>
-        <div class="reads">
-          <h3>Seen in this frame</h3>
-          <div id="chips"><span class="chip">—</span></div>
-          <div class="say" id="say" hidden></div>
+      <p class="label"><span>Through the glasses</span><span>camera view + HUD, as the wearer sees it</span></p>
+      <div class="screen">
+        <div class="view" id="view">
+          <img id="cam" alt="Glasses camera">
+          <iframe id="hudFrame" title="Glasses HUD"></iframe>
+          <span class="age" id="age">waiting for camera…</span>
         </div>
+      </div>
+      <div class="strip">
+        <span class="k">NAVIQ reads</span>
+        <span id="chips"><span class="chip">—</span></span>
       </div>
     </div>
   </section>
@@ -78,8 +75,8 @@ function fit() {
   const h = ph.clientHeight, w = Math.round(h * 390 / 844);
   ph.style.width = (w + 20) + "px"; ph.style.flex = "1";
   f.style.transform = `scale(${h / 844})`;
-  const hb = $("hudbox");
-  $("hudFrame").style.transform = `scale(${hb.clientWidth / 640})`;
+  // translateY hides the HUD's laptop-preview hint line (keyboard shortcuts) along its top edge
+  $("hudFrame").style.transform = `scale(${$("view").clientWidth / 640}) translateY(-24px)`;
 }
 addEventListener("resize", fit); setTimeout(fit, 50); setInterval(fit, 2000);
 
@@ -97,8 +94,6 @@ async function cam() {
     for (const x of r.places || []) add(`${x.kind.replace("_", " ")} · ${x.position}${x.close ? " · close" : ""}`, "place");
     for (const x of r.signs || []) add(`sign “${x.text.replace(/\s+/g, " ")}”`, "");
     if (!chips.children.length) add(r.rooms ? "nothing recognised" : "—", "");
-    const v = l.view;
-    $("say").hidden = !v; if (v) $("say").textContent = `${v.instruction}${v.detail ? " · " + v.detail : ""}`;
   } catch (e) { $("age").textContent = "can't reach NAVIQ"; }
   setTimeout(cam, 700);
 }
