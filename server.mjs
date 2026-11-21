@@ -283,7 +283,7 @@ function logStep(src, image, out) {
 }
 
 const kb = (dataUrl) => (dataUrl ? Math.round((dataUrl.length * 3) / 4 / 1024) : 0);
-const STATIC = { "/": "public/phone.html", "/hud": "public/hud.html" };
+const STATIC = { "/": "public/phone.html", "/hud": "public/hud.html", "/where": "public/where.html" };
 
 // Requests through the Cloudflare tunnel carry cf-* headers; local ones (laptop, glasses over adb) don't.
 function authorized(req, url) {
@@ -334,7 +334,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, lastCard);
 
       case "POST /api/snap": {
-        const { image, text } = await readJson(req);
+        const { image, text, heading } = await readJson(req);
         const t0 = Date.now();
         nav.noteFrame(image, "glasses");
         if (nav.recording) {
@@ -344,7 +344,7 @@ const server = http.createServer(async (req, res) => {
           return send(res, 200, out);
         }
         if (nav.active) {
-          const out = await nav.observe(image, text);
+          const out = await nav.observe(image, text, heading);
           if (out.busy) return send(res, 202, { busy: true });
           logStep("glasses", image, out);
           return send(res, 200, out.card);
@@ -459,7 +459,7 @@ const server = http.createServer(async (req, res) => {
       case "POST /api/heading": {
         const { h, reset } = await readJson(req);
         if (reset) return send(res, 200, nav.resetCalibration());
-        return send(res, 200, nav.setHeading(Number(h)));
+        return send(res, 200, nav.setHeading(h));
       }
       case "GET /api/heading":
         return send(res, 200, { heading: nav.heading, calibration: nav.calibration() });
@@ -467,7 +467,7 @@ const server = http.createServer(async (req, res) => {
       case "POST /api/naviq/observe": {
         const { image, text } = await readJson(req);
         nav.noteFrame(image, "phone");
-        const out = await nav.observe(image, text);
+        const out = await nav.observe(image, text, null);
         if (out.busy) return send(res, 202, { busy: true });
         logStep("phone", image, out);
         return send(res, 200, out);

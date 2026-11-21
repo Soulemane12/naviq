@@ -86,6 +86,7 @@ export function resolveTarget(text, models, { exit = false } = {}) {
 }
 
 // Vision "place" kinds → plan node kinds.
+const NOT_UNIQUE = new Set(["exit_doors", "elevators", "stairs"]);
 const PLACE_TO_NODE = { exit_doors: "exit", turnstiles: "turnstiles", elevators: "elevators", escalator: "escalator", stairs: "stairs", restroom: "restroom", info_desk: "lobby" };
 
 function nearestByPath(model, from, ids) {
@@ -95,35 +96,56 @@ function nearestByPath(model, from, ids) {
 }
 
 /**
- * Where the wearer is on the plan, from one camera read. A readable room plaque is the strongest anchor
- * (you can only read it up close); a recognised place counts as close only if the model says so.
+ * Find the best nearby anchor in one camera read. Distant signs can guide the wearer toward a place,
+ * but do not establish their position.
  */
 export function anchorFromRead(model, read, prevAt, verifiedFloor = null) {
   const inView = new Set([...(read.rooms ?? []).map((r) => parseRoom(r.label)?.label).filter(Boolean), ...(read.places ?? []).map((p) => PLACE_TO_NODE[p.kind] ?? p.kind)]);
-  for (const r of read.rooms ?? []) {
+  // Two different room numbers close together in the same spot = a hanging direction sign ("A104 / A106"),
+  // not a door plate: treat it as a sign.
+  const stacked = (r) => (read.rooms ?? []).some((o) => o !== r && o.close && o.position === r.position && parseRoom(o.label)?.label !== parseRoom(r.label)?.label);
+  const signRooms = [
+    ...(read.signs ?? []).filter((sg) => sg.close && sg.kind !== "exit").map((sg) => (sg.text.match(/[A-Z]{1,2}\s*-?\s*\d{3,4}(?:\.\d{1,3})?/gi) ?? []).map((x) => parseRoom(x)?.label).filter(Boolean)),
+    (read.rooms ?? []).filter((r) => r.close && stacked(r)).map((r) => parseRoom(r.label)?.label).filter(Boolean),
+  ].filter((list) => list.length >= 2);
+  // A known direction sign on the plan (the hanging "A104 / A106" sign at the side hall) places you under it.
+  for (const list of signRooms) {
+    const n = model.nodes.find((x) => Array.isArray(x.sign) && x.sign.every((lbl) => list.includes(lbl)));
+    if (n) return { id: n.id, close: true, via: "sign", label: n.near ?? n.id, position: "center", floor: n.floor, floorUnique: true };
+  }
+  const rooms = (read.rooms ?? []).filter((r) => r.close && !stacked(r)).sort((a, b) => Number(b.position === "center") - Number(a.position === "center"));
+  for (const r of rooms) {
     const p = parseRoom(r.label);
     if (!p || p.bldg !== model.building) continue;
     const doors = model.nodes.filter((n) => n.kind === "door" && n.room === p.label);
     if (!doors.length) continue;
     let id = null, ambiguous = null;
     if (doors.length === 1) id = doors[0].id;
-    else if (prevAt) id = nearestByPath(model, prevAt, doors.map((d) => d.id)); // continuity with where we were
     else {
       // Which door? Whatever else is in view next to it on the plan (bathrooms → north door, A103 → south…).
       const scored = doors.map((d) => ({ id: d.id, score: (d.context ?? []).filter((c) => inView.has(c)).length })).sort((x, y) => y.score - x.score);
       if (scored[0].score > (scored[1]?.score ?? 0)) id = scored[0].id;
-      else { id = scored[0].id; ambiguous = doors.map((d) => d.id); }
+      else {
+        ambiguous = doors.map((d) => d.id);
+        id = nearestByPath(model, prevAt, ambiguous);
+      }
     }
     const floor = model.byId[id].floor;
     return { id, close: Boolean(r.close), via: "room", label: p.label, position: r.position, floor, ambiguous };
   }
   const order = ["exit_doors", "turnstiles", "elevators", "escalator", "restroom", "stairs", "info_desk"];
-  const places = [...(read.places ?? [])].sort((a, b) => (b.close - a.close) || order.indexOf(a.kind) - order.indexOf(b.kind));
+  const places = (read.places ?? []).filter((p) => p.close).sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
   const exitSign = (read.signs ?? []).some((sg) => sg.kind === "exit");
   for (const pl of places) {
     // Any glass door (classroom doors have glass) can look like "exit doors": only treat it as the building's
     // main entrance when it's close AND an EXIT sign is visible too.
     if (pl.kind === "exit_doors" && !(pl.close && exitSign)) continue;
+    // EXIT signs, elevators and stairs repeat all over the building (an EXIT sign over a stairwell door next to
+    // A103, an elevator bank that isn't on the plan): once placed, they never move you; only room numbers and
+    // one-of-a-kind spots (main turnstiles, escalator, bathrooms) do. And the main entrance needs more than an
+    // EXIT sign: the turnstiles or the street visible too.
+    if (NOT_UNIQUE.has(pl.kind) && prevAt) continue;
+    if (pl.kind === "exit_doors" && !(read.outdoors || places.some((q) => q.kind === "turnstiles"))) continue;
     const nk = PLACE_TO_NODE[pl.kind];
     let nodes = model.nodes.filter((n) => n.kind === nk);
     if (!nodes.length) continue;
@@ -204,7 +226,7 @@ const placeName = (model, id) => {
  * Next move from `at` to the nearest of `targets`.
  * heading: compass degrees the head faces, or null if the compass is stale.
  */
-export function guide(model, at, targets, heading, { anchorJustSeen = true, followed = new Set(), prevArrow = null } = {}) {
+export function guide(model, at, targets, heading, { prevArrow = null } = {}) {
   if (targets.includes(at)) return { arrived: true };
   const p = shortestPath(model, at, targets);
   if (!p) return null;
@@ -225,20 +247,7 @@ export function guide(model, at, targets, heading, { anchorJustSeen = true, foll
     return { arrived: false, bearing: null, arrow: up ? "up" : "down", instruction, detail: `${up ? "Up" : "Down"} to floor ${floor}`, spoken: `Take the ${via} ${up ? "up" : "down"} to floor ${floor}.`, path: p, floorHop: true };
   }
 
-  // Stale anchor: the camera last recognised e.g. the turnstiles, but the head now points along the NEXT leg
-  // (you've walked through and turned). Treat a short current leg as done when that happens.
-  let ci = i, cur2 = cur, rest2 = rest;
-  // Only when the camera did NOT just see the anchor: reading a door plaque means you face the door, which
-  // says nothing about having walked on.
-  for (let hop = 0; hop < 2 && heading != null && !anchorJustSeen; hop++) {
-    const nx = rest2[0];
-    if (!nx || nx.floorHop || cur2.bearing == null || cur2.len >= 140) break;
-    if (!followed.has(`${cur2.from}>${cur2.to}`)) break; // they never faced along this leg: haven't walked it
-    if (Math.abs(turnAngle(heading, nx.bearing)) < 40 && Math.abs(turnAngle(heading, cur2.bearing)) > 50) {
-      ci = legs.indexOf(nx); cur2 = nx; rest2 = rest2.slice(1);
-    } else break;
-  }
-  return describe(model, p, legs, ci, cur2, rest2, heading, targetName, prevArrow);
+  return describe(model, p, legs, i, cur, rest, heading, targetName, prevArrow);
 }
 
 function describe(model, p, legs, i, cur, rest, heading, targetName, prevArrow) {
@@ -278,7 +287,7 @@ function describe(model, p, legs, i, cur, rest, heading, targetName, prevArrow) 
   const rel = turnAngle(heading, cur.bearing);
   const w = relWords(rel, prevArrow);
   const detail = cur.cue ? `${cur.cue}, ${then}` : then;
-  return { arrived: false, bearing: Math.round(cur.bearing), rel: Math.round(rel), arrow: w.arrow, instruction: w.word, detail, spoken: `${w.spoken}. ${detail}.`, path: p, compass: true, legKey: `${cur.from}>${cur.to}` };
+  return { arrived: false, bearing: Math.round(cur.bearing), arrow: w.arrow, instruction: w.word, detail, spoken: `${w.spoken}. ${detail}.`, path: p };
 }
 
 /** Places a phone UI can offer as one-tap destinations. */
