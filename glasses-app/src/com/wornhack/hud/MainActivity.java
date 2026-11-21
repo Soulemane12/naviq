@@ -1,6 +1,13 @@
 package com.wornhack.hud;
 
 import android.Manifest;
+import android.app.AlarmManager;
+import android.app.PendingIntent;
+import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.webkit.ValueCallback;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -45,6 +52,32 @@ public class MainActivity extends Activity {
     private boolean ttsReady;
     private long lastBackAt;
 
+    // Watchdog: the M6's sensor service sometimes spins at 100% CPU and the WebView renderer stops responding
+    // (HUD frozen on an old card). Every 5 s ask the page to evaluate "1"; no answer for 15 s → restart the app.
+    private final Handler watchdog = new Handler(Looper.getMainLooper());
+    private volatile long lastPong = SystemClock.elapsedRealtime();
+    private boolean resumed = false;
+    private final Runnable ping = new Runnable() {
+        @Override public void run() {
+            if (web != null && resumed) {
+                web.evaluateJavascript("1", new ValueCallback<String>() {
+                    @Override public void onReceiveValue(String v) { lastPong = SystemClock.elapsedRealtime(); }
+                });
+                if (SystemClock.elapsedRealtime() - lastPong > 15000) { restartSelf(); return; }
+            } else lastPong = SystemClock.elapsedRealtime();
+            watchdog.postDelayed(this, 5000);
+        }
+    };
+
+    private void restartSelf() {
+        Log.w(TAG, "HUD page not responding for 15 s: restarting the app");
+        Intent i = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        PendingIntent pi = PendingIntent.getActivity(this, 7, i, PendingIntent.FLAG_CANCEL_CURRENT);
+        AlarmManager am = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+        am.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + 1500, pi);
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -79,6 +112,7 @@ public class MainActivity extends Activity {
 
         setContentView(web);
         load();
+        watchdog.postDelayed(ping, 10000);
     }
 
     @Override
@@ -113,8 +147,15 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        resumed = false;
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        resumed = true; lastPong = SystemClock.elapsedRealtime();
         web.getRootView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                 | View.SYSTEM_UI_FLAG_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION

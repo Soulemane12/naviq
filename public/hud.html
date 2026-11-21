@@ -362,7 +362,7 @@
       c.width = Math.round(v.videoWidth * s); c.height = Math.round(v.videoHeight * s);
       c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
       var frameHeading = onGlasses && !pendingHeading ? freshHeading() : null;
-      var dataUrl = c.toDataURL("image/jpeg", 0.85);
+      var dataUrl = c.toDataURL("image/jpeg", 0.92);
       snapping = false; // frame captured: the next look can start while this one is being answered
       if (!document.body.classList.contains("navon")) setMeta("Reading scene…");
       requestTimeout = setTimeout(function () { controller.abort(); }, 12000);
