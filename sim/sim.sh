@@ -4,6 +4,7 @@
 #   sim/sim.sh setup   install SDK packages (once), create both emulators, build WornHUD.apk
 #   sim/sim.sh start   boot both, install the glasses app, point both at the laptop server
 #   sim/sim.sh camera  restart only the camera window (to switch VIDEO)
+#   sim/sim.sh arrange put the windows back: glasses top middle, camera below it, phone on the right
 #   sim/sim.sh stop    shut both down
 #
 # Glasses: Android 9 (API 28, as on the M6), 640x480 at 160 dpi, running the real WornHUD.apk.
@@ -39,6 +40,8 @@ GS=emulator-5554 PS=emulator-5556
 GIMG="system-images;android-28;google_apis;x86_64"
 PIMG="system-images;android-34;google_apis;x86_64"
 CITYTECH_LON=-73.98735 CITYTECH_LAT=40.69545
+# Window layout for a 1920x1080 screen; the left 750 px stay free for a terminal.
+GLASSES_X=760 GLASSES_Y=0 PHONE_X=1470 PHONE_Y=0 CAM_X=760 CAM_Y=600 CAM_W=480 CAM_H=400
 WEBCAM="${WEBCAM:-none}"   # emulator camera; list webcams with: $EMU -webcam-list
 LOG="$SIM/run/session"
 mkdir -p "$LOG"
@@ -116,9 +119,14 @@ start() {
   "$ADB" -s "$PS" shell am set-debug-app --persistent com.android.chrome
   "$ADB" -s "$PS" shell pm grant com.android.chrome android.permission.ACCESS_FINE_LOCATION || true
   "$ADB" -s "$PS" emu geo fix "$CITYTECH_LON" "$CITYTECH_LAT" >/dev/null
-  "$ADB" -s "$PS" shell am start -a android.intent.action.VIEW -d http://localhost:8787/ com.android.chrome >&2
+  # application_id: Chrome reuses one tab instead of opening a new one on every start.
+  "$ADB" -s "$PS" shell am start -a android.intent.action.VIEW -d http://localhost:8787/ \
+    --es com.android.browser.application_id naviq com.android.chrome >&2
 
+  slim_phone
   [ "$WEBCAM" = none ] && camera_window
+  sleep 3
+  arrange
 
   say "glasses: $GS   phone: $PS   logs: $LOG"
   say "walk the route:  sim/walk.py --adb $PS"
@@ -150,9 +158,32 @@ camera_window() {
   local flags=()
   [ -n "${VIDEO:-}" ] && mapfile -t flags < <(video_flags | tr ' ' '\n')
   stop_camera
-  google-chrome --user-data-dir="$LOG/chrome-camera" --no-first-run --use-fake-ui-for-media-stream --mute-audio \
-    "${flags[@]}" --window-size=480,400 --app="http://localhost:8787/hud?glasses=1" >"$LOG/camera.log" 2>&1 &
+  # X11 (XWayland) so --window-position works on GNOME; --test-type hides the "unsupported flag" bar.
+  google-chrome --user-data-dir="$LOG/chrome-camera" --no-first-run --test-type --ozone-platform=x11 \
+    --use-fake-ui-for-media-stream --mute-audio "${flags[@]}" \
+    --window-size="$CAM_W,$CAM_H" --window-position="$CAM_X,$CAM_Y" \
+    --app="http://localhost:8787/hud?glasses=1" >"$LOG/camera.log" 2>&1 &
   say "camera: ${VIDEO:-laptop webcam}"
+}
+
+# The emulator windows are XWayland, so wmctrl can move them.
+arrange() {
+  command -v wmctrl >/dev/null || { say "no wmctrl (dnf install wmctrl): windows not arranged"; return 0; }
+  wmctrl -r "Android Emulator - $GLASSES:5554" -e "0,$GLASSES_X,$GLASSES_Y,-1,-1" || true
+  wmctrl -r "Android Emulator - $PHONE:5556" -e "0,$PHONE_X,$PHONE_Y,-1,-1" || true
+  wmctrl -r "NAVIQ HUD" -e "0,$CAM_X,$CAM_Y,-1,-1" || true
+}
+
+# A 2 GB phone emulator runs out of memory with Gmail, YouTube and friends in the background
+# ("System UI isn't responding").  Chrome is all it needs.  Undo with: adb -s emulator-5556 shell pm enable PKG
+slim_phone() {
+  local pkg
+  for pkg in com.google.android.gm com.google.android.youtube com.google.android.apps.photos \
+             com.google.android.apps.messaging com.google.android.googlequicksearchbox \
+             com.google.android.apps.wellbeing com.google.android.apps.docs com.google.android.apps.maps \
+             com.google.android.apps.youtube.music com.google.android.videos; do
+    "$ADB" -s "$PS" shell pm disable-user --user 0 "$pkg" >/dev/null 2>&1 || true
+  done
 }
 
 stop_camera() {
@@ -168,7 +199,8 @@ stop() {
 case "${1:-}" in
   setup) setup ;;
   start) start ;;
-  camera) camera_window ;;   # restart only the camera window, e.g. VIDEO=other.mp4 sim/sim.sh camera
+  camera) camera_window; sleep 3; arrange ;;
+  arrange) arrange ;;   # restart only the camera window, e.g. VIDEO=other.mp4 sim/sim.sh camera
   stop) stop ;;
-  *) sed -n 2,26p "$0" >&2; exit 2 ;;
+  *) sed -n 2,27p "$0" >&2; exit 2 ;;
 esac
