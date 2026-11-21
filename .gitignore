@@ -8,3 +8,5 @@ bin/
 .bench.mjs
 .scenetest.mjs
 data/citytech/ac_page1.png
+sim/run/
+sim/android/

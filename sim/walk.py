@@ -68,7 +68,7 @@ def main():
 
     for p in points(line, args.speed * args.every):
         if args.adb:
-            adb = os.path.join(os.environ.get("ANDROID_HOME", os.path.expanduser("~/Android/Sdk")), "platform-tools", "adb")
+            adb = os.path.join(os.environ.get("ANDROID_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "android", "sdk")), "platform-tools", "adb")
             subprocess.run([adb, "-s", args.adb, "emu", "geo", "fix", str(p["lon"]), str(p["lat"])], check=True, stdout=subprocess.DEVNULL)
         else:
             call(args.base, "/api/naviq/loc", {"lat": p["lat"], "lon": p["lon"], "acc": 6, "speed": args.speed, "sampleAt": int(time.time() * 1000)})
