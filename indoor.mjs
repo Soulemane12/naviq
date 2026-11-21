@@ -117,7 +117,11 @@ export function anchorFromRead(model, read, prevAt, verifiedFloor = null) {
   }
   const order = ["exit_doors", "turnstiles", "elevators", "escalator", "restroom", "stairs", "info_desk"];
   const places = [...(read.places ?? [])].sort((a, b) => (b.close - a.close) || order.indexOf(a.kind) - order.indexOf(b.kind));
+  const exitSign = (read.signs ?? []).some((sg) => sg.kind === "exit");
   for (const pl of places) {
+    // Any glass door (classroom doors have glass) can look like "exit doors": only treat it as the building's
+    // main entrance when it's close AND an EXIT sign is visible too.
+    if (pl.kind === "exit_doors" && !(pl.close && exitSign)) continue;
     const nk = PLACE_TO_NODE[pl.kind];
     let nodes = model.nodes.filter((n) => n.kind === nk);
     if (!nodes.length) continue;
@@ -181,9 +185,10 @@ function legsOf(model, p) {
 
 const STUB = 45; // plan units: a door to its corridor spot, a few steps
 
-export function relWords(rel) {
+export function relWords(rel, prevArrow = null) {
   const a = Math.abs(rel);
-  if (a <= 30) return { arrow: "straight", word: "GO STRAIGHT", spoken: "go straight" };
+  // Indoor compasses drift 20-40°: "straight" up to 45° off, and keep saying straight up to 60° if we already were.
+  if (a <= 45 || (prevArrow === "straight" && a <= 60)) return { arrow: "straight", word: "GO STRAIGHT", spoken: "go straight" };
   if (a >= 140) return { arrow: "back", word: "TURN AROUND", spoken: "turn around" };
   return rel > 0 ? { arrow: "right", word: "TURN RIGHT", spoken: "turn right" } : { arrow: "left", word: "TURN LEFT", spoken: "turn left" };
 }
@@ -197,7 +202,7 @@ const placeName = (model, id) => {
  * Next move from `at` to the nearest of `targets`.
  * heading: compass degrees the head faces, or null if the compass is stale.
  */
-export function guide(model, at, targets, heading, { anchorJustSeen = true, followed = new Set() } = {}) {
+export function guide(model, at, targets, heading, { anchorJustSeen = true, followed = new Set(), prevArrow = null } = {}) {
   if (targets.includes(at)) return { arrived: true };
   const p = shortestPath(model, at, targets);
   if (!p) return null;
@@ -231,10 +236,10 @@ export function guide(model, at, targets, heading, { anchorJustSeen = true, foll
       ci = legs.indexOf(nx); cur2 = nx; rest2 = rest2.slice(1);
     } else break;
   }
-  return describe(model, p, legs, ci, cur2, rest2, heading, targetName);
+  return describe(model, p, legs, ci, cur2, rest2, heading, targetName, prevArrow);
 }
 
-function describe(model, p, legs, i, cur, rest, heading, targetName) {
+function describe(model, p, legs, i, cur, rest, heading, targetName, prevArrow) {
   const next = rest[0];
   // What to say after this leg: the next turn, or where the target is.
   let then = "";
@@ -265,7 +270,7 @@ function describe(model, p, legs, i, cur, rest, heading, targetName) {
     return { arrived: false, bearing: cur.bearing, arrow: "straight", instruction: `TO ${toward.replace(/^the /, "").toUpperCase()}`.slice(0, 18), detail: then, spoken: `Head to ${toward}, ${then}.`, path: p, compass: false };
   }
   const rel = turnAngle(heading, cur.bearing);
-  const w = relWords(rel);
+  const w = relWords(rel, prevArrow);
   const detail = cur.cue ? `${cur.cue}, ${then}` : then;
   return { arrived: false, bearing: Math.round(cur.bearing), rel: Math.round(rel), arrow: w.arrow, instruction: w.word, detail, spoken: `${w.spoken}. ${detail}.`, path: p, compass: true, legKey: `${cur.from}>${cur.to}` };
 }

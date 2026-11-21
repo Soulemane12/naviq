@@ -775,7 +775,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       }
       if (R.at) {
         R.followed ??= new Set();
-        const g = indoor.guide(t.model, R.at, t.nodes, h, { anchorJustSeen: Boolean(a && a.id === R.at), followed: R.followed });
+        const g = indoor.guide(t.model, R.at, t.nodes, h, { anchorJustSeen: Boolean(a && a.id === R.at), followed: R.followed, prevArrow: s.roomView?.arrow ?? null });
         if (g?.compass && g.legKey && Math.abs(g.rel) < 40) { R.followed.add(g.legKey); R.ambiguous = null; } // facing along it = walking it
         R.path = g?.path ?? null;
         if (g?.arrived && t.viaLift) {
