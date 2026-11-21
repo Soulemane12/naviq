@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>NAVIQ · Where am I</title>
+<title>NAVIQ Live</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <style>
   :root {
     --bg: #f4f5f2; --card: #ffffff; --ink: #14171a; --muted: #5d6670; --line: #d9ddd6;
@@ -27,7 +28,7 @@
   .status.ok b { color: var(--ok); }
   .status.stale b { color: var(--warn); }
   .map { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-  svg { display: block; width: 100%; height: auto; }
+  #svg { display: block; width: 100%; height: auto; }
   .plan-img { opacity: 0.55; }
   @media (prefers-color-scheme: dark) { .plan-img { opacity: 0.35; filter: invert(1) hue-rotate(180deg); } }
   .edge { stroke: var(--edge); stroke-width: 3; stroke-linecap: round; }
@@ -48,6 +49,17 @@
   .see h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 4px; }
   .chips span { display: inline-block; margin: 0 6px 6px 0; padding: 3px 8px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); font-size: 13px; }
   .err { color: var(--warn); font-size: 13px; }
+  #omap { height: 340px; border-radius: 12px; border: 1px solid var(--line); overflow: hidden; }
+  .dial { display: grid; grid-template-columns: 120px 1fr; gap: 14px; align-items: center; margin: 12px 0; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  .dial svg { width: 120px; height: 120px; }
+  .dial .ring { fill: none; stroke: var(--line); stroke-width: 3; }
+  .dial .tick { fill: var(--muted); font-size: 13px; font-weight: 700; text-anchor: middle; }
+  .dial .face { stroke: var(--accent); stroke-width: 6; stroke-linecap: round; }
+  .dial .route { stroke: var(--ok); stroke-width: 4; stroke-linecap: round; stroke-dasharray: 2 7; opacity: 1; fill: none; }
+  .dial b { display: block; font-size: 18px; }
+  .dial .k { color: var(--muted); font-size: 13px; }
+  .dial .wrong { color: var(--warn); font-weight: 700; }
+  .me-icon { width: 90px; height: 90px; }
   .navb { margin: 0 0 12px; padding: 12px 14px; border-radius: 12px; background: var(--accent); color: #fff; }
   .navb b { display: block; font-size: 22px; letter-spacing: 0.02em; }
   .navb span { font-size: 15px; opacity: 0.92; }
@@ -64,7 +76,7 @@
 <body>
 <main>
   <header>
-    <h1>Where am I</h1>
+    <h1>NAVIQ Live</h1>
     <span class="sub" id="bldg">City Tech</span>
   </header>
 
@@ -79,7 +91,23 @@
 
   <div class="status" id="status"><b id="where">Not tracking</b><div class="meta" id="meta">Tap “Start tracking”, then look at a room number.</div></div>
 
-  <div class="map"><svg id="svg" viewBox="0 0 100 40" aria-label="Floor plan with your position"></svg></div>
+  <div class="map" id="pmap"><svg id="svg" viewBox="0 0 100 40" aria-label="Floor plan with your position"></svg></div>
+  <div id="omap" hidden></div>
+
+  <div class="dial">
+    <svg viewBox="-60 -60 120 120" aria-label="Which way you face vs the route">
+      <circle class="ring" r="50"></circle>
+      <text class="tick" y="-36">N</text><text class="tick" x="40" y="5">E</text><text class="tick" y="45">S</text><text class="tick" x="-40" y="5">W</text>
+      <line id="dRoute" class="route" x1="0" y1="0" x2="0" y2="-46" style="display:none"></line>
+      <line id="dFace" class="face" x1="0" y1="0" x2="0" y2="-42" style="display:none"></line>
+      <circle r="5" fill="currentColor"></circle>
+    </svg>
+    <div>
+      <b id="dTitle">Facing: —</b>
+      <div class="k" id="dSrc">No compass reading from the glasses yet</div>
+      <div class="k" id="dRouteTxt"></div>
+    </div>
+  </div>
 
   <div class="row">
     <button class="primary" id="start">Start tracking</button>
@@ -96,6 +124,7 @@
     </div>
   </div>
 </main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const NS = "http://www.w3.org/2000/svg";
@@ -213,14 +242,84 @@ function render(p) {
   for (const t of items.length ? items : [r ? "nothing recognised" : "no recent frame"]) { const s = document.createElement("span"); s.textContent = t; chips.appendChild(s); }
 }
 
+// ---------- facing dial (indoor and outdoor): blue = way you face, green dashed = way to go ----------
+const DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+const dirName = (d) => DIRS[Math.round(d / 45) % 8];
+function dial(face, src, route) {
+  const f = $("dFace"), r = $("dRoute");
+  if (face != null) { f.style.display = ""; f.setAttribute("transform", `rotate(${face})`); $("dTitle").textContent = `Facing ${dirName(face)} · ${Math.round(face)}°`; $("dSrc").textContent = src || ""; }
+  else { f.style.display = "none"; $("dTitle").textContent = "Facing: —"; $("dSrc").textContent = "No compass reading from the glasses yet"; }
+  if (route != null) {
+    r.style.display = ""; r.setAttribute("transform", `rotate(${route})`);
+    let txt = `Route goes ${dirName(route)} · ${Math.round(route)}°`;
+    if (face != null) {
+      const rel = ((route - face + 540) % 360) - 180;
+      const a = Math.abs(rel);
+      txt += a < 40 ? " · you're facing it ✓" : a >= 130 ? " · turn around" : ` · turn ${rel > 0 ? "right" : "left"} ${Math.round(a)}°`;
+      $("dRouteTxt").className = "k" + (a >= 60 ? " wrong" : "");
+    }
+    $("dRouteTxt").textContent = txt;
+  } else { r.style.display = "none"; $("dRouteTxt").textContent = ""; }
+}
+
+// ---------- outdoor view: real map, route line, your GPS dot + facing cone ----------
+let omap = null, oLine = null, oMe = null, oLineKey = "", oFollow = true;
+function meIcon(face) {
+  const cone = face == null ? "" : `<path d="M45 45 L28 6 A40 40 0 0 1 62 6 Z" fill="rgba(31,111,235,.25)" stroke="#1f6feb" stroke-width="1.5" transform="rotate(${face} 45 45)"/>`;
+  return L.divIcon({ className: "", iconSize: [90, 90], iconAnchor: [45, 45], html: `<svg class="me-icon" viewBox="0 0 90 90">${cone}<circle cx="45" cy="45" r="9" fill="#1f6feb" stroke="#fff" stroke-width="3"/></svg>` });
+}
+function renderOutdoor(card, st) {
+  $("pmap").hidden = true; $("omap").hidden = false;
+  if (!omap) {
+    omap = L.map("omap", { zoomControl: false });
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(omap);
+    omap.on("dragstart", () => { oFollow = false; });
+  }
+  setTimeout(() => omap.invalidateSize(), 0);
+  const line = (st.outdoor.line || []).map((p) => [p.lat, p.lon]);
+  const key = line.length + ":" + (line[0] || "") + (line[line.length - 1] || "");
+  if (key !== oLineKey) {
+    if (oLine) oLine.remove();
+    oLine = L.polyline(line, { color: "#1a7f37", weight: 6, opacity: 0.8 }).addTo(omap);
+    if (line.length) omap.fitBounds(oLine.getBounds(), { padding: [30, 30] });
+    oLineKey = key; oFollow = true;
+  }
+  const n = card.nav || {}, face = n.facing ? n.facing.deg : null;
+  if (st.fix) {
+    const ll = [st.fix.lat, st.fix.lon];
+    if (!oMe) oMe = L.marker(ll, { icon: meIcon(face), interactive: false }).addTo(omap);
+    else { oMe.setLatLng(ll); oMe.setIcon(meIcon(face)); }
+    if (oFollow) omap.panTo(ll, { animate: true });
+  }
+  const nb = $("navb");
+  nb.hidden = false; $("navi").textContent = n.instruction || card.title || ""; $("navd").textContent = n.detail || "";
+  const stc = $("status");
+  stc.className = "status " + (n.wrongWay ? "stale" : "ok");
+  $("where").textContent = `To ${st.outdoor.to ? st.outdoor.to.name : st.destination}`;
+  $("meta").textContent = [st.outdoor.remaining != null ? `${Math.round(st.outdoor.remaining)} m left` : null, st.fix ? `GPS ±${Math.round(st.fix.acc)} m` : "waiting for phone GPS", n.wrongWay ? "facing the wrong way" : null].filter(Boolean).join(" · ");
+  dial(face, n.facing ? `from ${n.facing.src}` : "", Number.isFinite(n.aheadBearingTrue) ? n.aheadBearingTrue : n.routeBearing);
+  $("chips").innerHTML = "<span>outdoors: camera not used</span>";
+}
+
 async function poll() {
   try {
-    const r = await fetch("/api/indoor/plan", { cache: "no-store" });
-    if (!r.ok) throw new Error("server " + r.status);
-    render(await r.json());
+    const [cr, sr] = await Promise.all([fetch("/api/state", { cache: "no-store" }), fetch("/api/naviq/state", { cache: "no-store" })]);
+    if (!cr.ok || !sr.ok) throw new Error("server " + (cr.ok ? sr.status : cr.status));
+    const card = await cr.json(), st = await sr.json();
+    if (st.active && st.outdoor) renderOutdoor(card, st);
+    else {
+      $("pmap").hidden = false; $("omap").hidden = true;
+      const r = await fetch("/api/indoor/plan", { cache: "no-store" });
+      if (!r.ok) throw new Error("server " + r.status);
+      const p = await r.json();
+      render(p);
+      const n = card.nav || {};
+      const src = p.heading ? (p.heading.calibrated ? "glasses compass, calibrated by a door sign" : "glasses compass, not calibrated yet: look at a room number") : "";
+      dial(p.heading ? p.heading.deg : null, src, p.trip && p.trip.kind !== "track" && Number.isFinite(n.aheadBearingTrue) ? n.aheadBearingTrue : null);
+    }
     $("err").textContent = "";
   } catch (e) { $("err").textContent = "Can't reach NAVIQ: " + e.message; }
-  setTimeout(poll, 700);
+  setTimeout(poll, 800);
 }
 $("frame").onerror = () => { $("frame").style.visibility = "hidden"; };
 $("frame").onload = () => { $("frame").style.visibility = "visible"; };
