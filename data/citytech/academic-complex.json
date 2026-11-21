@@ -12,24 +12,24 @@
     {
       "id": "entrance",
       "floor": 1,
-      "x": 708,
-      "y": 1495,
+      "x": 470,
+      "y": 1283,
       "kind": "exit",
-      "label": "Main Entrance (Jay St)"
+      "label": "the exit"
     },
     {
       "id": "lobby",
       "floor": 1,
-      "x": 708,
-      "y": 1408,
+      "x": 520,
+      "y": 1283,
       "kind": "lobby",
       "label": "the lobby"
     },
     {
       "id": "turnstiles",
       "floor": 1,
-      "x": 708,
-      "y": 1330,
+      "x": 560,
+      "y": 1283,
       "kind": "turnstiles",
       "label": "the turnstiles"
     },
@@ -330,23 +330,17 @@
       "y": 693,
       "kind": "door",
       "room": "A209"
+    },
+    {
+      "id": "double_doors",
+      "floor": 1,
+      "x": 600,
+      "y": 1283,
+      "kind": "doors",
+      "label": "the double doors"
     }
   ],
   "edges": [
-    [
-      "entrance",
-      "lobby",
-      "through the entrance doors"
-    ],
-    [
-      "lobby",
-      "turnstiles"
-    ],
-    [
-      "turnstiles",
-      "c_entry",
-      "through the turnstiles"
-    ],
     [
       "lobby",
       "theater_gates"
@@ -487,6 +481,25 @@
     [
       "f2_e",
       "a209_d2"
+    ],
+    [
+      "c_west",
+      "double_doors",
+      "through the double doors"
+    ],
+    [
+      "double_doors",
+      "turnstiles",
+      "past the turnstiles"
+    ],
+    [
+      "turnstiles",
+      "lobby"
+    ],
+    [
+      "lobby",
+      "entrance",
+      "out the exit"
     ]
   ],
   "places": [
@@ -591,5 +604,6 @@
     "width": 1546,
     "height": 2000,
     "note": "Page 1 of AC_layout.pdf; node x/y are pixels in this image."
-  }
+  },
+  "groundTruth": "Exit route corrected from walking it: hallway → double doors → turnstiles → exit, straight on from A105/A103."
 }

@@ -244,14 +244,18 @@ function describe(model, p, legs, i, cur, rest, heading, targetName, prevArrow) 
   // What to say after this leg: the next turn, or where the target is.
   let then = "";
   const finalStub = legs[legs.length - 1];
-  if (!next) {
+  // Everything left is straight on (e.g. double doors → turnstiles → exit): say it as one sentence.
+  const after = legs.slice(i + 1);
+  if (after.length && after.every((l) => l.bearing != null && cur.bearing != null && Math.abs(turnAngle(cur.bearing, l.bearing)) < 30) && after.some((l) => l.cue)) {
+    then = `then ${after.map((l) => l.cue).filter(Boolean).join(", ")}`;
+  } else if (!next) {
     // Final approach: which side is the target on as you walk this leg?
     let side = "";
     if (finalStub && finalStub !== cur && finalStub.bearing != null && cur.bearing != null) {
       const r = turnAngle(cur.bearing, finalStub.bearing);
       side = Math.abs(r) < 30 ? "ahead" : r > 0 ? "on your right" : "on your left";
     } else side = "ahead";
-    then = `${targetName} ${side}`;
+    then = side === "ahead" ? `${targetName} ahead` : `then straight, ${targetName} ${side}`;
   } else if (next.floorHop) {
     const up = model.byId[next.to].floor > model.byId[next.from].floor;
     then = `then the ${model.byId[next.from].kind === "escalator" ? "escalator" : "elevator"} ${up ? "up" : "down"} to floor ${model.byId[next.to].floor}`;
