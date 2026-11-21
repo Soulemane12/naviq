@@ -91,3 +91,27 @@ Then:
 What works now: outdoor GPS + Mapbox turn-by-turn (fake crosswalk turns removed, path distance to the metre, smoothing, live countdown); the glasses compass rotates the arrow to the real direction; indoor room-number finding (A105 → A103 logic, floors, wrong-way detection); exit finding by scene (gpt-6.1-terra); two parallel look workers; review timeline with photos.
 
 Still to check on site: compass direction outdoors (face south on Jay St; the arrow should point behind you when heading north). If it's off by a fixed 90° or 180°, fix the heading formula in `public/hud.html` (`onOrient`).
+
+## City Tech live navigation
+
+- **Find a room:** In Navigate, choose **A103** or **A105**, or enter a room number. Tap **Start on glasses** and look at the nearest room plaque or landmark. The M6 scans automatically and uses City Tech's [Academic Complex floor plan](https://www.citytech.cuny.edu/theater/docs/AC_layout.pdf) for its mapped rooms and public paths. There is no route-recording step.
+- **Exit and continue outside:** Choose **Exit** and optionally select a walking destination before starting. The glasses guide you to the exit and the phone supplies GPS for the outdoor leg. For an outdoor-only trip, select a walking destination by itself.
+- **Check the live camera:** Expand **Glasses camera** during an indoor trip to see the latest frame and recognized landmarks. If the glasses need a better view, face a nearby sign and let them scan again.
+- **Rehearse on the M6:** Confirm the same instruction appears on both screens during A105 → A103, then check the Jay Street doors and walk north toward Jay Street & Tillary Street. Turn to face south and confirm the arrow points behind you. The sensors and wireless connection need that on-site check.
+
+## Indoor navigation at City Tech (live camera, no recording)
+
+NAVIQ uses **City Tech's published Academic Complex floor plan** (`data/citytech/AC_layout.pdf`, from citytech.cuny.edu). It's traced into a walkable map in `data/citytech/academic-complex.json`: A103–A106, A209, the main entrance on Jay St, turnstiles, elevators, escalator, bathrooms and the theater side. It's oriented with real compass directions: the building sits on the east side of Jay St, which runs ~2°/182°.
+
+How a trip works, entirely live:
+1. **Pick a destination:** a room (A103), or exit / bathroom / elevator / escalator / stairs. One-tap list: `GET /api/indoor/places`.
+2. **Look around.** The glasses camera sends a frame about every second, with two AI "workers" in parallel and the newest answer winning. The AI reports what it can read and see: room plaques (and whether they're close), turnstiles, elevators, exit doors, bathrooms, signs.
+3. **NAVIQ places you on the plan:** a close plaque or a recognised landmark. Elevators and escalators are used only once the floor is confirmed. A105's two doors are told apart by what else is in view; if it can't tell and the directions would differ, it says **WHICH DOOR?** instead of guessing.
+4. **It routes on the plan** and uses the **glasses compass** to say TURN LEFT / RIGHT / GO STRAIGHT / TURN AROUND. The arrow rotates live toward the right direction.
+5. **Arrival** only when the target plaque is close, or the place is right there. Exit plus an outdoor destination → GPS walking directions take over outside.
+
+For buildings or floors not on the plan, it falls back to room-number logic: the floor digit, which way numbers increase (remembered as a compass bearing), signs, and remembered landmark directions.
+
+Phone map: `GET /api/indoor/plan` returns the plan image, node pixels, current position and planned path.
+
+**Before demoing: `npm run check`** verifies keys, model access, Mapbox, the plan, the server, the tunnel and the glasses.

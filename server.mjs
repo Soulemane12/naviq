@@ -14,10 +14,16 @@
 //   POST /api/key                    { code, name } → glasses key (logged + relayed)
 //   GET  /api/geo/search?q=&lat=&lon= → OpenStreetMap place search
 //   GET  /api/tts?text=              → mp3 for the glasses speaker (OpenAI)
+//   GET  /api/live                   latest camera look: what the AI saw + the current instruction (no image)
+//   GET  /api/live/frame             latest camera frame (image/jpeg)
+//   GET  /api/indoor/places          one-tap indoor destinations from the real City Tech plan
+//   GET  /api/indoor/plan            the plan for a map: image url, node x/y, edges, current node + planned path
+//   GET  /api/indoor/plan.jpg        City Tech's floor plan image (node x/y are pixels in it)
+//   POST /api/heading                { h } glasses compass, degrees
 //   GET  /api/naviq/routes           recorded routes (data/routes.json)
 //   POST /api/naviq/routes/delete    { id }
-//   POST /api/naviq/start            { routeId?, destination?: { name, lat, lon } }
-//   POST /api/naviq/loc              { lat, lon, acc } phone GPS
+//   POST /api/naviq/start            { destination?: {name,lat,lon}, room?: "A103"|"exit"|"bathroom"|"elevator"|…, exit?: true }
+//   POST /api/naviq/loc              { lat, lon, acc, speed?, sampleAt? } phone GPS (sampleAt = Safari pos.timestamp)
 //   POST /api/naviq/observe          { image } verify with the phone camera
 //   POST /api/naviq/step             { dir: "next" | "back" }
 //   POST /api/naviq/stop
@@ -158,27 +164,40 @@ async function makeCard({ mode = "assist", text = "", image, context }) {
 // ---------- OpenStreetMap place search (Nominatim; 1 request/second policy) ----------
 
 let lastGeo = 0;
-// Mapbox search first (better at intersections and businesses), OpenStreetMap as the fallback.
+// Two Mapbox searches in parallel: Search Box finds named places (it returns "Jay St–MetroTech" station
+// first; Geocoding returns street addresses for that query), Geocoding v6 is better at exact addresses and
+// intersections. Order by what the query looks like; OpenStreetMap is the fallback.
+async function mapboxJson(url) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()).features ?? [];
+}
+const fromFeature = (f, kind) => ({
+  name: f.properties.name,
+  address: f.properties.full_address ?? f.properties.place_formatted ?? "",
+  lat: f.properties.coordinates.latitude,
+  lon: f.properties.coordinates.longitude,
+  kind,
+});
 async function geoSearch(q, near) {
   const tok = process.env.MAPBOX_TOKEN;
   if (tok) {
-    try {
-      const p = new URLSearchParams({ q, limit: "6", access_token: tok, ...(near ? { proximity: `${near.lon},${near.lat}` } : {}) });
-      const res = await fetch(`https://api.mapbox.com/search/geocode/v6/forward?${p}`, { signal: AbortSignal.timeout(8000) });
-      if (res.ok) {
-        const out = ((await res.json()).features ?? []).map((f) => ({
-          name: f.properties.name,
-          address: f.properties.place_formatted ?? f.properties.full_address ?? "",
-          lat: f.properties.coordinates.latitude,
-          lon: f.properties.coordinates.longitude,
-        }));
-        // proximity only biases Mapbox; drop far-away matches (e.g. a same-named street in another state)
-        const near50 = near ? out.filter((r) => Math.hypot((r.lat - near.lat) * 111, (r.lon - near.lon) * 85) < 50) : out;
-        if (near50.length) return near50;
-      }
-    } catch (err) {
-      console.error(`[search] mapbox failed: ${err.message}`);
+    const prox = near ? { proximity: `${near.lon},${near.lat}` } : {};
+    const [poi, addr] = await Promise.all([
+      mapboxJson(`https://api.mapbox.com/search/searchbox/v1/forward?${new URLSearchParams({ q, limit: "6", language: "en", access_token: tok, ...prox })}`)
+        .then((fs) => fs.map((f) => fromFeature(f, "place"))).catch((e) => (console.error(`[search] searchbox: ${e.message}`), [])),
+      mapboxJson(`https://api.mapbox.com/search/geocode/v6/forward?${new URLSearchParams({ q, limit: "6", access_token: tok, ...prox })}`)
+        .then((fs) => fs.map((f) => fromFeature(f, "address"))).catch((e) => (console.error(`[search] geocoding: ${e.message}`), [])),
+    ]);
+    const addressy = /^\s*\d|&|\band\b|\bcorner\b/i.test(q); // "285 Jay St", "Jay St & Tillary St"
+    const merged = [];
+    for (const r of addressy ? [...addr, ...poi] : [...poi, ...addr]) {
+      if (!Number.isFinite(r.lat)) continue;
+      if (near && Math.hypot((r.lat - near.lat) * 111, (r.lon - near.lon) * 85) > 50) continue; // same name, other city
+      if (merged.some((m) => Math.hypot((m.lat - r.lat) * 111000, (m.lon - r.lon) * 85000) < 40 && m.name === r.name)) continue;
+      merged.push(r);
     }
+    if (merged.length) return merged.slice(0, 8);
   }
   return osmSearch(q, near);
 }
@@ -259,7 +278,7 @@ function logStep(src, image, out) {
   const v = out.verdict, g = out.guide, r = out.read, n = out.card?.nav;
   const what = v ? `${v.seen_id} (${v.confidence}) "${v.sign_text}"`
     : g ? `${g.located ? g.location : "not located"} (${g.confidence}) → ${g.instruction} ${g.detail}${g.arrived ? " ARRIVED" : ""}`
-    : r ? `rooms [${r.rooms.map((x) => x.label + "@" + x.position).join(" ")}] up:${r.numbers_increase} → ${n?.instruction ?? ""} ${n?.detail ?? ""}` : "";
+    : r ? `rooms [${r.rooms.map((x) => x.label + "@" + x.position).join(" ")}] places [${(r.places ?? []).map((x) => x.kind + "@" + x.position + (x.close ? "!" : "")).join(" ")}] up:${r.numbers_increase} → ${n?.instruction ?? ""} · ${n?.detail ?? ""}${n?.aheadBearing != null ? ` [${n.aheadBearing}°]` : ""}` : "";
   console.log(`[naviq] ${src} image=${kb(image)}KB ${out.ms}ms → ${what}`);
 }
 
@@ -317,6 +336,7 @@ const server = http.createServer(async (req, res) => {
       case "POST /api/snap": {
         const { image, text } = await readJson(req);
         const t0 = Date.now();
+        nav.noteFrame(image, "glasses");
         if (nav.recording) {
           const out = await nav.recSnap(image);
           if (out.busy) return send(res, 202, { busy: true });
@@ -408,9 +428,28 @@ const server = http.createServer(async (req, res) => {
       }
 
       case "POST /api/naviq/loc": {
-        const { lat, lon, acc, speed } = await readJson(req);
+        const { lat, lon, acc, speed, sampleAt } = await readJson(req);
         if (!Number.isFinite(lat) || !Number.isFinite(lon)) return send(res, 400, { error: "bad location" });
-        return send(res, 200, nav.location({ lat, lon, acc, speed: Number.isFinite(speed) ? speed : undefined }));
+        return send(res, 200, nav.location({
+          lat, lon, acc,
+          speed: Number.isFinite(speed) ? speed : undefined,
+          sampleAt: Number.isFinite(sampleAt) ? sampleAt : undefined, // dedupes the phone's heartbeat copies
+        }));
+      }
+
+      case "GET /api/live":
+        return send(res, 200, nav.liveInfo());
+      case "GET /api/live/frame":
+        return sendFrame(res, nav.liveFrame());
+      case "GET /api/indoor/places":
+        return send(res, 200, { places: nav.places() });
+      // City Tech's real floor plan for the phone map: image + node pixels + current position and path.
+      case "GET /api/indoor/plan":
+        return send(res, 200, nav.planInfo() ?? { error: "no plan" });
+      case "GET /api/indoor/plan.jpg": {
+        const f = nav.planImageFile();
+        if (!f) return send(res, 404, { error: "no plan image" });
+        return send(res, 200, await fs.readFile(f), "image/jpeg", { "cache-control": "public, max-age=3600" });
       }
 
       // Glasses compass: which way the wearer faces (the HUD rotates its arrow locally; this is for the log/phone).
@@ -423,6 +462,7 @@ const server = http.createServer(async (req, res) => {
 
       case "POST /api/naviq/observe": {
         const { image, text } = await readJson(req);
+        nav.noteFrame(image, "phone");
         const out = await nav.observe(image, text);
         if (out.busy) return send(res, 202, { busy: true });
         logStep("phone", image, out);

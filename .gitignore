@@ -7,3 +7,4 @@ bin/
 .speedtest.mjs
 .bench.mjs
 .scenetest.mjs
+data/citytech/ac_page1.png

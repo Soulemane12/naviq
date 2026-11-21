@@ -15,6 +15,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { z } from "zod";
+import * as indoor from "./indoor.mjs";
 
 const VERIFY_SYSTEM = `You check navigation checkpoints for a person wearing smart glasses.
 You get one first-person camera frame and a list of known landmarks. Each has an id and a description of its sign or appearance.
@@ -48,14 +49,22 @@ arrived=true only when the destination is clearly right in front of the wearer.
 location: where they are on the plan in a few words, e.g. "corridor outside A105, facing the lobby".
 seen_text: the exact text you read in image 2 (empty if none).`;
 
-const ROOM_READ_SYSTEM = `You are the eyes of a person wearing smart glasses indoors. Describe only what is actually in the frame.
-rooms: every room number you can read (door plates, wall plaques), with where it sits in the frame: "left", "center" or "right".
+const ROOM_READ_SYSTEM = `You are the eyes of a person wearing smart glasses indoors. Report only what is actually in the frame.
+rooms: every room number you can read (door plates, wall plaques), with where it sits in the frame ("left", "center" or "right") and close=true only if that plaque is within a few steps (large in the frame).
 numbers_increase: if two or more room numbers are visible, the way the numbers go UP from the wearer's point of view: "left", "right", "ahead" (further down the corridor) or "behind". "unknown" with fewer than two numbers.
-signs: every directional or wayfinding sign you can read: exact text, its arrow ("left", "right", "straight", "up", "down" or "none"), and kind: "room_range" (e.g. "A101-A120"), "exit", "stairs", "elevator" or "other".
-exit: the nearest way OUT of the building you can see, judged by how things look, not only by signs: glass doors to the street, revolving doors, entrance/exit doors, daylight or street through doors, an EXIT sign. visible=false if none is in view. position in the frame. cue: what it is, a few words. path: how to get there if something is in the way (e.g. "through the turnstiles"), else empty.
-stairs / elevator: visible (by look or sign) and position in the frame.
+signs: every directional or wayfinding sign you can read: exact text, its arrow ("left", "right", "straight", "up", "down" or "none"), and kind: "room_range" (e.g. "A101-A120"), "exit", "stairs", "elevator", "restroom" or "other".
+places: things you can recognise by how they look or by their sign: "exit_doors" (glass doors to the street, entrance/exit doors, an EXIT sign over doors), "turnstiles" (security gates), "elevators" (elevator doors or call buttons), "escalator", "stairs", "restroom" (restroom door or sign), "info_desk" (security or information desk). For each: position in the frame, close=true if it is within a few steps (large in the frame), and cue: a few words (e.g. "glass doors with EXIT sign, past the turnstiles").
 outdoors: the wearer is clearly outside the building.
-Never invent text, rooms or doors that aren't in the frame.`;
+Never invent text, rooms, doors or places that aren't in the frame.`;
+const POS = z.enum(["left", "center", "right"]);
+const READ_SCHEMA = z.object({
+  rooms: z.array(z.object({ label: z.string(), position: POS, close: z.boolean() })),
+  numbers_increase: z.enum(["left", "right", "ahead", "behind", "unknown"]),
+  signs: z.array(z.object({ text: z.string(), arrow: z.enum(["left", "right", "straight", "up", "down", "none"]), kind: z.enum(["room_range", "exit", "stairs", "elevator", "restroom", "other"]) })),
+  places: z.array(z.object({ kind: z.enum(["exit_doors", "turnstiles", "elevators", "escalator", "stairs", "restroom", "info_desk"]), position: POS, close: z.boolean(), cue: z.string() })),
+  outdoors: z.boolean(),
+});
+const short = (txt, n) => (String(txt).length > n ? String(txt).slice(0, n - 1).replace(/\s+\S*$/, "") + "…" : String(txt));
 
 const MAX_FRAMES = 60;
 const ROUTER = process.env.NAVIQ_ROUTER ?? "https://routing.openstreetmap.de/routed-foot/route/v1/foot";
@@ -185,7 +194,12 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   let busy = false;
   let inflight = 0;
   let lastFix = null;
-  let heading = null; // which way the wearer's head faces (from the glasses compass), degrees from north // latest phone GPS, kept even between trips so a new trip can route immediately // room trips run two looks at once (two "workers" on alternating frames)
+  let heading = null; // which way the wearer's head faces (glasses compass), degrees from north
+  const models = indoor.loadModels(path.join(path.dirname(routesFile), "citytech")); // real building plans
+  console.log(`[indoor] plans: ${models.map((m) => `${m.name} (${m.nodes.length} nodes)`).join(", ") || "none"}`);
+  // Latest camera look, for the phone's "what the glasses see" panel.
+  const live = { frame: null, frameTs: 0, source: null, read: null, view: null, ts: 0 };
+  const headingNow = () => (heading && Date.now() - heading.ts < 3000 ? heading.deg : null);
 
   async function loadRoutes() {
     try {
@@ -275,10 +289,18 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       total: r.outdoorOnly ? 0 : total,
       modeChanged: Boolean(extra.modeChanged),
       ...(extra.dist ?? {}),
+      ...(extra.navExtra ?? {}),
       auto: Boolean(((s.plan && !s.plan.done) || (s.room && !s.room.done)) && !s.outdoor && !s.done), // glasses look on their own
       autoMs: s.room ? 900 : 8000,
     });
     if (s.plan || s.room) { nav.step = 0; nav.total = 0; }
+    if (s.room && !nav.target) nav.target = s.room.target.label;
+    if (!nav.phase) {
+      const o = s.outdoor;
+      nav.phase = s.finalView || kind === "arrived" ? "arrived"
+        : o ? (o.waiting ? "waiting_gps" : o.routing ? "routing" : o.steps.length ? "guiding" : "compass")
+        : kind === "unknown" || kind === "pending" ? "looking" : "guiding";
+    }
     return {
       title: nav.instruction,
       lines: [nav.detail, nav.status],
@@ -304,7 +326,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       routeName: r.name,
       destination: r.destination,
       outdoorOnly: Boolean(r.outdoorOnly || r.plan || r.room),
-      room: s.room ? { target: s.room.target.label ?? "EXIT", last: s.room.last?.label ?? null, done: Boolean(s.room.done) } : null,
+      room: s.room ? { target: s.room.target.label, kind: s.room.target.kind, onPlan: Boolean(s.room.target.model), at: s.room.atLabel ?? null, atNode: s.room.at ?? null, path: s.room.path ?? null, floor: s.room.floor ?? null, last: s.room.last?.label ?? null, done: Boolean(s.room.done) } : null,
       plan: s.plan ? { id: s.plan.id, target: s.plan.target, last: s.plan.last ?? null, done: Boolean(s.plan.done) } : null,
       index: s.index,
       total: r.checkpoints.length,
@@ -324,34 +346,48 @@ export function createNav({ routesFile, askJSON, broadcast }) {
 
   function startOutdoor(c, toIndex) {
     const to = c.walkTo;
-    s.outdoor = { to, toIndex, line: [], steps: [], stepIdx: 0, view: null, near: false, rerouteAt: 0, waiting: false };
+    s.outdoor = { to, toIndex, line: [], steps: [], stepIdx: 0, view: null, near: false, rerouteAt: 0, waiting: false, routing: false };
     const fresh = s.fix && Date.now() - s.fix.ts < 30000 && s.fix.acc <= 80;
     if (fresh) return routeOutdoor(s.fix, "Directions ready");
     s.outdoor.waiting = true;
     s.outdoor.view = { arrow: "scan", instruction: "FINDING YOU", detail: `Walking to ${to.name}` };
-    emit("gps", "Waiting for phone GPS…", { speak: `Walking to ${to.name}. Waiting for GPS.` });
+    emit("gps", "Waiting for phone GPS…", { speak: `Walking to ${to.name}. Waiting for GPS.`, navExtra: { phase: "waiting_gps" } });
   }
 
   async function routeOutdoor(from, reason) {
     const o = s.outdoor;
+    if (o.routing) return; // one directions request at a time
+    const rerouting = o.steps.length > 0;
     o.waiting = false;
+    o.routing = true; // while true, new fixes don't touch the card (no premature compass fallback)
+    o.view = { arrow: "scan", instruction: rerouting ? "REROUTING" : "GETTING ROUTE", detail: `To ${o.to.name}` };
+    emit("gps", rerouting ? "Off route, rerouting…" : "Getting walking directions…", {
+      speak: rerouting ? "Off route. Rerouting." : "",
+      navExtra: { phase: rerouting ? "rerouting" : "routing" },
+    });
     try {
       const w = await fetchWalk(from, o.to);
       if (s?.outdoor !== o) return; // leg ended while fetching
       const cum = [0];
       for (let i = 1; i < w.line.length; i++) cum.push(cum[i - 1] + dist(w.line[i - 1], w.line[i]));
       console.log(`[directions] ${w.source}: ${Math.round(w.distance)} m, ${w.steps.length} steps → ${w.steps.map((x) => x.maneuver.type + (x.maneuver.modifier ? "-" + x.maneuver.modifier : "") + (x.name ? "(" + x.name + ")" : "")).join(" → ")}`);
-      Object.assign(o, w, { cum, stepIdx: -1, error: null, near: false, now10: false, remaining: w.distance, lastBucket: null });
-      updateOutdoor(from, { reason, force: true });
+      Object.assign(o, w, { cum, stepIdx: -1, error: null, near: false, now10: false, remaining: w.distance, lastBucket: null, routing: false });
+      updateOutdoor(s.fix ?? from, { reason, force: true }); // the newest accepted fix, not the one we asked with
     } catch (err) {
       if (s?.outdoor !== o) return;
-      // Directions service down: real straight-line compass guidance from the real GPS fix.
+      o.routing = false;
+      o.rerouteAt = Date.now();
+      // Directions service down: real straight-line compass guidance from the newest real GPS fix.
+      const fix = s.fix ?? from;
       o.error = err.message;
-      o.line = [from, o.to];
+      o.line = [fix, o.to];
       o.steps = [];
-      const d = dist(from, o.to);
-      o.view = { arrow: "straight", instruction: `HEAD ${compass(bearing(from, o.to))}`, detail: `${o.to.name}, ${roundDist(d)} m` };
-      emit("gps", "Compass only (directions offline)", { speak: `Head ${compass(bearing(from, o.to)).toLowerCase()}, ${roundDist(d)} meters.` });
+      const d = dist(fix, o.to);
+      o.view = { arrow: "straight", instruction: `HEAD ${compass(bearing(fix, o.to))}`, detail: `${o.to.name}, ${roundDist(d)} m` };
+      emit("gps", "Compass only (directions offline)", {
+        speak: `Head ${compass(bearing(fix, o.to)).toLowerCase()}, ${roundDist(d)} meters.`,
+        navExtra: { phase: "compass", aheadBearing: Math.round(bearing(fix, o.to)), distM: d, acc: fix.acc, speed: 0 },
+      });
     }
   }
 
@@ -363,7 +399,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       s.done = true;
       s.endedAt = Date.now();
       s.finalView = { arrow: "arrive", instruction: "ARRIVED", detail: o.to.name };
-      emit("arrived", `Arrived: ${o.to.name}`, { speak: `You've arrived at ${o.to.name}.` });
+      emit("arrived", `Arrived: ${o.to.name}`, { speak: `You've arrived at ${o.to.name}.`, navExtra: { phase: "arrived" } });
       return;
     }
     enterCheckpoint(o.toIndex);
@@ -378,13 +414,15 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   function updateOutdoor(fix, { reason = "", force = false } = {}) {
     const o = s.outdoor;
     if (!o) return;
+    if (o.routing) return; // directions on the way: keep the "getting route" card
     if (o.waiting) return routeOutdoor(fix, "Got your location");
     if (!o.steps.length) {
-      // compass mode: keep heading/distance live
+      // compass mode (directions service failed): keep heading/distance live, retry directions every 30 s
       const d = dist(fix, o.to);
       if (d <= (o.to.arriveRadius ?? 30)) return arriveOutdoor();
+      if (Date.now() - o.rerouteAt > 30000) return routeOutdoor(fix, "Directions ready");
       o.view = { arrow: "straight", instruction: `HEAD ${compass(bearing(fix, o.to))}`, detail: `${o.to.name}, ${roundDist(d)} m` };
-      emit("gps", `Compass only · GPS ±${Math.round(fix.acc)} m`);
+      emit("gps", `Compass only · GPS ±${Math.round(fix.acc)} m`, { navExtra: { phase: "compass", aheadBearing: Math.round(bearing(fix, o.to)), distM: d, acc: fix.acc, speed: fix.speed ?? 0 } });
       return;
     }
 
@@ -401,13 +439,15 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     if (off > Math.max(40, (fix.acc ?? 0) * 1.5) && fix.acc <= 30 && Date.now() - o.rerouteAt > 15000) {
       o.rerouteAt = Date.now();
       s.history.push({ ts: Date.now(), result: "reroute", label: `${Math.round(off)} m off the path`, confidence: "gps", ms: 0 });
-      emit("warn", "Off route, rerouting…", { speak: "Off route. Rerouting." });
-      routeOutdoor(fix, "Rerouted");
+      routeOutdoor(fix, "Rerouted"); // shows its own "rerouting" card
       return;
     }
     const along = o.cum[seg] + segT * (o.cum[seg + 1] - o.cum[seg]);
     const total = o.cum[o.cum.length - 1];
     const toGo = Math.max(0, total - along);
+    // The route usually ends on the sidewalk a few metres short of the geocoded point: arriving at the route's
+    // end counts too.
+    if (off <= Math.max(15, fix.acc ?? 15) && toGo <= Math.max(8, Math.min(20, fix.acc ?? 20))) return arriveOutdoor(); // must be ON the route
 
     // Next real maneuver ahead of us along the path (distance measured along the path, not straight-line).
     let k = o.steps.findIndex((st, i) => i > 0 && o.cum[st.lineIndex] > along + 2);
@@ -417,12 +457,19 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     o.nextDist = d;
     o.remaining = toGo;
 
-    const view = maneuverView(next);
-    if (next.maneuver.type === "arrive") view.detail = o.to.name;
+    let view = maneuverView(next);
+    const onlyArrivalLeft = next.maneuver.type === "arrive" && d > 30;
+    if (onlyArrivalLeft) {
+      // Nothing but the arrival ahead (e.g. a straight walk): keep showing the leg you're on until close.
+      const cur = o.steps[Math.max(0, k - 1)];
+      view = cur.maneuver.type === "depart" ? maneuverView(cur) : { arrow: "straight", instruction: "CONTINUE", detail: cur.name ? `on ${cur.name}` : `to ${o.to.name}` };
+    } else if (next.maneuver.type === "arrive") view.detail = o.to.name;
     const stepChanged = k !== o.stepIdx;
     const near30 = d <= 30, near10 = d <= 10;
     let speak = "";
-    if (force || stepChanged) speak = `${reason ? reason + ". " : ""}In ${exactDist(d)} meters, ${view.instruction.toLowerCase()} ${view.detail}.`;
+    if (force || stepChanged) speak = onlyArrivalLeft
+      ? `${reason ? reason + ". " : ""}${view.instruction.toLowerCase()} ${view.detail}. ${o.to.name} in ${exactDist(d)} meters.`
+      : `${reason ? reason + ". " : ""}In ${exactDist(d)} meters, ${view.instruction.toLowerCase()} ${view.detail}.`;
     else if (near10 && !o.now10 && next.maneuver.type !== "arrive") speak = `${view.instruction.toLowerCase()} now.`;
     else if (near30 && !o.near) speak = `In ${exactDist(d)} meters, ${view.instruction.toLowerCase()}.`;
     o.stepIdx = k; o.near = near30; o.now10 = near10; o.view = view;
@@ -436,8 +483,9 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     const tt = Math.max(0, Math.min(1, (aheadAlong - o.cum[j]) / segLen));
     const aheadPt = { lat: o.line[j].lat + (o.line[j + 1].lat - o.line[j].lat) * tt, lon: o.line[j].lon + (o.line[j + 1].lon - o.line[j].lon) * tt };
     const here = { lat: o.line[seg].lat + (o.line[seg + 1].lat - o.line[seg].lat) * segT, lon: o.line[seg].lon + (o.line[seg + 1].lon - o.line[seg].lon) * segT };
-    emit("gps", `In ${exactDist(d)} m · ${gps}`, {
+    emit("gps", `${onlyArrivalLeft ? "Arrive in" : "In"} ${exactDist(d)} m · ${gps}`, {
       speak,
+      navExtra: { phase: "guiding" },
       dist: { distM: d, speed: fix.speed ?? 0, acc: fix.acc, toGoM: toGo, aheadBearing: Math.round(bearing(here, aheadPt)) },
       phoneDetail: `${view.instruction} ${view.detail} in ${exactDist(d)} m. ${exactDist(toGo)} m to ${o.to.name}.`,
     });
@@ -460,7 +508,9 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   // lagging much (readings older than ~3 s fade out).
   const recent = [];
   function smooth(fix) {
-    const now = Date.now();
+    // Age by when the phone measured the fix (Safari pos.timestamp) when we have it, else by arrival time.
+    const now = Number.isFinite(fix.sampleAt) ? fix.sampleAt : Date.now();
+    if (recent.length && now < recent[recent.length - 1].ts) recent.length = 0; // clock source changed: start over
     recent.push({ ...fix, ts: now });
     while (recent.length && now - recent[0].ts > 4000) recent.shift();
     let wsum = 0, lat = 0, lon = 0;
@@ -468,17 +518,48 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       const w = Math.exp(-(now - r.ts) / 1500) / Math.max(3, r.acc ?? 30) ** 2;
       wsum += w; lat += w * r.lat; lon += w * r.lon;
     }
-    const acc = Math.min(fix.acc ?? 50, Math.sqrt(recent.reduce((a, r) => a + (r.acc ?? 30) ** 2, 0) / recent.length) / Math.sqrt(recent.length));
-    // Walking speed: the phone's own reading if it has one, else from how far we moved in the window.
+    // Accuracy: consecutive GPS errors are correlated, so averaging doesn't shrink them by √n. Report the
+    // (weighted) typical accuracy, never better than the newest reading claims.
+    let accSum = 0;
+    for (const r of recent) accSum += (Math.exp(-(now - r.ts) / 1500) / Math.max(3, r.acc ?? 30) ** 2) * (r.acc ?? 30);
+    const acc = Math.min(fix.acc ?? 50, accSum / wsum);
+    // Walking speed: the phone's own reading if it has one; else from displacement, but only when the move is
+    // bigger than the GPS noise (otherwise standing still would count down metres).
     let speed = Number.isFinite(fix.speed) && fix.speed >= 0 ? fix.speed : 0;
     if (!speed && recent.length > 1) {
-      const a = recent[0], b = recent[recent.length - 1];
-      if (b.ts > a.ts) speed = Math.min(3, dist(a, b) / ((b.ts - a.ts) / 1000));
+      const a = recent[0], b = recent[recent.length - 1], moved = dist(a, b);
+      if (b.ts > a.ts && moved > 2 * Math.max(a.acc ?? 30, b.acc ?? 30)) speed = Math.min(2.5, moved / ((b.ts - a.ts) / 1000));
     }
-    return { lat: lat / wsum, lon: lon / wsum, acc: Math.max(3, Math.round(acc)), speed, ts: now };
+    return { lat: lat / wsum, lon: lon / wsum, acc: Math.max(3, Math.round(acc)), speed, ts: Date.now() };
+  }
+
+  // The phone re-sends its latest reading every second as a heartbeat. Only NEW readings may feed smoothing
+  // and the indoor→outdoor counter: with sampleAt (Safari pos.timestamp) a repeat or older stamp is a copy;
+  // old clients without it: an exact repeat of lat/lon/acc within 10 s.
+  let lastSample = null;
+  function isRepeat(raw) {
+    const now = Date.now();
+    if (Number.isFinite(raw.sampleAt)) {
+      if (lastSample?.sampleAt != null && raw.sampleAt <= lastSample.sampleAt) return true;
+    } else if (lastSample && raw.lat === lastSample.lat && raw.lon === lastSample.lon && raw.acc === lastSample.acc && now - lastSample.at < 10000) {
+      return true;
+    }
+    lastSample = { sampleAt: Number.isFinite(raw.sampleAt) ? raw.sampleAt : null, lat: raw.lat, lon: raw.lon, acc: raw.acc, at: now };
+    return false;
   }
 
   function location(raw) {
+    if (isRepeat(raw)) {
+      // Still the best position we have: keep it fresh (so a new trip can route) without counting it again.
+      if (lastFix) {
+        lastFix.ts = Date.now();
+        if (s && !s.done) {
+          s.fix = lastFix;
+          if (s.outdoor?.waiting) updateOutdoor(lastFix);
+        }
+      }
+      return { ok: true, duplicate: true };
+    }
     const fix = smooth(raw);
     lastFix = { lat: fix.lat, lon: fix.lon, acc: fix.acc, speed: fix.speed, ts: Date.now() };
     if (!s || s.done) return { ok: true };
@@ -508,10 +589,15 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     if (rec) throw Object.assign(new Error("finish or cancel the recording first"), { status: 409 });
     let r, plan = null, roomTrip = null;
     if (room || exit) {
-      const target = exit ? { exit: true, label: "EXIT" } : parseRoom(room);
-      if (!target) throw Object.assign(new Error("Type a room number like A103"), { status: 400 });
-      roomTrip = { target, outdoorDest: destination ?? null, last: null, done: false };
-      r = { id: "_room", name: `${target.exit ? "Exit" : target.label}${destination ? ` → ${destination.name}` : ""}`, destination: destination?.name ?? (target.exit ? "Exit" : target.label), room: true, checkpoints: [], offRoute: [] };
+      const target = indoor.resolveTarget(room, models, { exit: Boolean(exit) });
+      if (!target) throw Object.assign(new Error("Type a room number like A103, or exit / bathroom / elevator / stairs"), { status: 400 });
+      // A room in a planned building but on a floor the plan doesn't cover: use the plan to reach the lifts.
+      if (target.kind === "room" && !target.model && target.room.floor !== 1) {
+        const m = models.find((mm) => mm.building === target.room.bldg);
+        if (m) Object.assign(target, { model: m, nodes: target.room.floor === 2 ? ["escalator", "elevators"] : ["elevators"], viaLift: true });
+      }
+      roomTrip = { target, outdoorDest: destination ?? null, last: null, done: false, at: null, mem: { inc: {} } };
+      r = { id: "_room", name: `${target.label}${destination ? ` → ${destination.name}` : ""}`, destination: destination?.name ?? target.label, room: true, checkpoints: [], offRoute: [] };
     } else if (planId) {
       const meta = (await listPlans()).find((p) => p.id === planId);
       const image = meta && (await planImage(planId));
@@ -539,7 +625,10 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     } else throw Object.assign(new Error("pick a destination or a recorded route"), { status: 400 });
 
     s = { route: r, plan, planView: null, room: roomTrip, roomView: null, index: -1, offRoute: null, outdoor: null, fix: lastFix && Date.now() - lastFix.ts < 60000 ? lastFix : null, wrongTurns: 0, history: [], frames: [], startedAt: Date.now(), endedAt: null, done: false, lastCard: null, finalView: null };
-    if (roomTrip) emit("unknown", "Look at a room number", { speak: roomTrip.target.exit ? "Finding the exit. Look around for exit signs." : `Finding ${roomTrip.target.label}. Look at a room number.` });
+    if (roomTrip) emit("unknown", roomTrip.target.model ? "Finding you on the City Tech plan" : "Look at a room number", {
+      speak: `Finding ${roomTrip.target.label}. Look around: room numbers, turnstiles or elevators.`,
+      navExtra: { phase: "looking", target: roomTrip.target.label },
+    });
     else if (plan) emit("unknown", "Locating you on the floor plan", { speak: `Heading to ${place}. Look around; I'll find you on the floor plan.` });
     else if (r.outdoorOnly) enterCheckpoint(0);
     else emit("unknown", "Tap at a sign to verify", { speak: `Navigation started. Find the ${cp(0).label} sign and tap to verify.` });
@@ -585,132 +674,231 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     startOutdoor({ walkTo: { ...dest, arriveRadius: 30 } }, Infinity);
   }
 
-  // ---------- room finding: room-number logic, no map needed ----------
-  async function roomObserve(image) {
+  // ---------- indoor: live camera + glasses compass, routed on the real plan when we have one ----------
+  // Every frame: the vision model reports what it can read/see; this code locates the wearer (room plaque or a
+  // recognised place → plan node), routes on the plan, and turns the next leg into left/right/straight using the
+  // compass. Without a plan for the target it falls back to room-number logic plus compass memory.
+  const POS_OFFSET = { left: -30, center: 0, right: 30 }; // where something sits in frame → degrees off the head
+  const DIR_OFFSET = { left: -90, right: 90, ahead: 0, behind: 180 };
+  const TARGET_PLACE = { exit: ["exit_doors"], restroom: ["restroom"], elevator: ["elevators"], escalator: ["escalator"], stairs: ["stairs"] };
+  const SHORT_NAME = { exit: "EXIT", restroom: "BATHROOMS", elevator: "ELEVATORS", escalator: "ESCALATOR", stairs: "STAIRS", theater: "THEATER" };
+  const norm360 = (d) => ((d % 360) + 360) % 360;
+  const posWords = (pos) => (pos === "center" ? "ahead" : `on your ${pos}`);
+
+  async function indoorObserve(image) {
     inflight += 1;
-    const trip = s;
-    const seq = (s.room.seq = (s.room.seq ?? 0) + 1);
+    const trip = s, R = s.room;
+    const seq = (R.seq = (R.seq ?? 0) + 1);
     const frame = s.frames.push(image) - 1;
     if (s.frames.length > MAX_FRAMES) s.frames[s.frames.length - MAX_FRAMES - 1] = null;
-    const t = s.room.target;
-    const Read = z.object({
-      rooms: z.array(z.object({ label: z.string(), position: z.enum(["left", "center", "right"]) })),
-      numbers_increase: z.enum(["left", "right", "ahead", "behind", "unknown"]),
-      signs: z.array(z.object({ text: z.string(), arrow: z.enum(["left", "right", "straight", "up", "down", "none"]), kind: z.enum(["room_range", "exit", "stairs", "elevator", "other"]) })),
-      exit: z.object({ visible: z.boolean(), position: z.enum(["left", "center", "right"]), cue: z.string(), path: z.string() }),
-      stairs: z.object({ visible: z.boolean(), position: z.enum(["left", "center", "right"]) }),
-      elevator: z.object({ visible: z.boolean(), position: z.enum(["left", "center", "right"]) }),
-      outdoors: z.boolean(),
-    });
+    const hFrame = headingNow(); // which way the head faced when this frame was taken
     const t0 = Date.now();
     let v;
     try {
-      // The target is deliberately NOT in the prompt, so the model can't "see" the room it's told to expect.
-      // Exits / changing floors need scene understanding (slower, smarter model); reading room numbers doesn't.
-      const needScene = t.exit || Boolean(s.room.last && s.room.last.floor !== t.floor);
-      v = await askJSON({ system: ROOM_READ_SYSTEM, prompt: "What room numbers, signs and ways out are visible?", image, schema: Read, name: "room_read", fast: !needScene, scene: needScene });
+      // The target is deliberately NOT in the prompt, so the model can't "see" what it's told to expect.
+      v = await askJSON({ system: ROOM_READ_SYSTEM, prompt: "What room numbers, signs and places are visible?", image, schema: READ_SCHEMA, name: "indoor_read", scene: true });
     } catch (err) {
-      if (s === trip) {
+      if (s === trip && !s.done) {
         s.history.push({ ts: Date.now(), result: "error", label: err.message, frame });
-        emit("unknown", `AI error: ${err.message}`.slice(0, 40));
+        emit("unknown", `AI error: ${err.message}`.slice(0, 40), { navExtra: { phase: "looking" } });
       }
       throw err;
     } finally {
       inflight -= 1;
     }
     // A newer frame already answered (or the trip changed): drop this stale answer.
-    if (s !== trip || s.done || s.room.done || seq < (s.room.applied ?? 0)) return { busy: true, stale: true };
-    s.room.applied = seq;
-    // Plain code turns the signs into arrows for this target.
-    const arrowOf = (kinds, test = () => true) => v.signs.find((sg) => kinds.includes(sg.kind) && sg.arrow !== "none" && test(sg))?.arrow ?? "none";
-    const inRange = (sg) => {
-      const nums = [...sg.text.toUpperCase().matchAll(/([A-Z]{1,2})?\s*-?\s*(\d{3,4})/g)].map((m) => ({ b: m[1], n: Number(m[2]) }));
-      if (!nums.length || t.exit) return false;
-      if (nums.some((x) => x.b && x.b !== t.bldg)) return false;
-      const lo = Math.min(...nums.map((x) => x.n)), hi = Math.max(...nums.map((x) => x.n));
-      return nums.length === 1 ? lo === t.num : t.num >= lo && t.num <= hi;
-    };
-    v.target_arrow = t.exit ? arrowOf(["exit"]) : arrowOf(["room_range", "other"], inRange);
-    // Seen-by-look → arrow from where it sits in the frame; a sign's arrow wins when there is one.
-    const POS_ARROW = { left: "left", center: "straight", right: "right" };
-    v.stairs_arrow = arrowOf(["stairs"]) !== "none" ? arrowOf(["stairs"]) : v.stairs.visible ? POS_ARROW[v.stairs.position] : "none";
-    v.elevator_arrow = arrowOf(["elevator"]) !== "none" ? arrowOf(["elevator"]) : v.elevator.visible ? POS_ARROW[v.elevator.position] : "none";
-    v.exit_visible = v.exit.visible || v.signs.some((sg) => sg.kind === "exit");
+    if (s !== trip || s.done || R.done || seq < (R.applied ?? 0)) return { busy: true, stale: true };
+    R.applied = seq;
+    const t = R.target;
     const ms = Date.now() - t0;
-    const seen = v.rooms.map((r) => ({ ...parseRoom(r.label), position: r.position })).filter((r) => r.label);
-    const entry = { ts: Date.now(), frame, ms, sign_text: seen.map((r) => r.label).join(", "), confidence: seen.length ? "high" : "low" };
-    let view, kind = "ok", status, speak;
+    const h = hFrame ?? headingNow();
+    const seen = v.rooms.map((r) => ({ ...indoor.parseRoom(r.label), position: r.position })).filter((r) => r.label);
+    const seenOut = v.rooms.map((r) => ({ label: r.label, position: r.position }));
+    live.read = v; live.ts = Date.now();
+    const entry = {
+      ts: Date.now(), frame, ms,
+      sign_text: [...seen.map((r) => r.label), ...v.places.map((p) => p.kind.replace("_", " "))].join(", "),
+      confidence: seen.length || v.places.length ? "high" : "low",
+    };
+    const finish = (card) => { s.history.push(entry); live.view = card.nav; return { read: v, ms, card, state: state() }; };
 
-    if (v.outdoors && s.room.outdoorDest) {
+    // Remember where places were seen as compass bearings, to keep pointing after they leave the frame.
+    if (h != null) for (const p of v.places) R.mem[p.kind] = { bearing: norm360(h + POS_OFFSET[p.position]), ts: Date.now(), cue: p.cue };
+
+    // Walked outside?
+    if (v.outdoors && R.outdoorDest) {
       entry.result = "outside-gps"; entry.label = "Outside (camera)";
       s.history.push(entry);
       leavePlanForOutdoor("Outside (camera)");
       return { read: v, ms, card: s.lastCard, state: state() };
     }
-
-    const match = !t.exit && seen.find((r) => r.label === t.label);
-    if (match || (t.exit && v.outdoors)) {
+    const arrive = (detail, statusText, spoken) => {
       entry.result = "arrived"; entry.label = t.label;
-      s.history.push(entry);
-      s.room.done = true;
-      if (s.room.outdoorDest && t.exit) { leavePlanForOutdoor("Out the exit"); return { read: v, ms, card: s.lastCard, state: state() }; }
-      s.done = true; s.endedAt = Date.now();
-      s.finalView = { mode: "indoor", arrow: "arrive", instruction: t.exit ? "YOU'RE OUT" : "ARRIVED", detail: t.exit ? "Outside" : `${t.label}${match.position !== "center" ? `, on your ${match.position}` : ""}` };
-      return { read: v, ms, card: emit("arrived", t.exit ? "Out of the building" : `Found ${t.label}`, { speak: t.exit ? "You're outside." : `This is ${t.label}${match.position !== "center" ? `, on your ${match.position}` : ""}.` }), state: state() };
+      R.done = true; s.done = true; s.endedAt = Date.now();
+      s.finalView = { mode: "indoor", arrow: "arrive", instruction: t.kind === "exit" ? "YOU'RE OUT" : "ARRIVED", detail };
+      return finish(emit("arrived", statusText, { speak: spoken, navExtra: { phase: "arrived", target: t.label, seen: seenOut } }));
+    };
+    if (t.kind === "exit" && v.outdoors) return arrive("Outside", "Out of the building", "You're outside.");
+    let view = null, kind = "ok", phase = "guiding", status = "", bearingOut = null, spoken = "";
+
+    // 1) The target itself is in view.
+    const roomHit = t.room && v.rooms.map((r) => ({ ...r, p: indoor.parseRoom(r.label) })).find((r) => r.p?.label === t.room.label);
+    if (roomHit?.close) return arrive(`${t.room.label} ${posWords(roomHit.position)}`, `Found ${t.room.label}`, `This is ${t.room.label}, ${posWords(roomHit.position)}.`);
+    if (roomHit) {
+      // Readable but still a few doors away: walk to it, don't claim arrival yet.
+      const pos = roomHit.position;
+      view = { arrow: pos === "center" ? "straight" : pos, instruction: `${t.room.label} ${pos === "center" ? "AHEAD" : pos.toUpperCase()}`, detail: "Walk up to the door" };
+      bearingOut = h != null ? norm360(h + POS_OFFSET[pos]) : null;
+      status = `${t.room.label} in view`; spoken = `${t.room.label} ${pos === "center" ? "ahead" : `to your ${pos}`}.`;
     }
-
-    // Reference room: the one nearest the centre of view, else the one closest to the target number.
-    const ref = seen.find((r) => r.position === "center") ?? [...seen].sort((a, b) => Math.abs(a.num - (t.num ?? 0)) - Math.abs(b.num - (t.num ?? 0)))[0];
-    const sign = (a) => a !== "none" && a !== undefined;
-
-    if (t.exit) {
-      const short = (t, n) => (t.length > n ? t.slice(0, n - 1).replace(/\s+\S*$/, "") + "…" : t);
-      const how = short(v.exit.path || v.exit.cue, 34);
-      if (v.exit.visible) {
-        const pos = v.exit.position;
-        view = { arrow: POS_ARROW[pos], instruction: pos === "center" ? "EXIT AHEAD" : `EXIT ${pos.toUpperCase()}`, detail: how || "Walk to the doors" };
-      } else if (sign(v.target_arrow)) view = { arrow: DIR_ARROW[v.target_arrow], instruction: DIR_WORD[v.target_arrow], detail: "Follow the EXIT sign" };
-      else view = { arrow: "scan", instruction: "LOOK AROUND", detail: "Turn to find doors outside" };
-      status = v.exit.visible ? short(`Exit: ${v.exit.cue || "in view"}`, 36) : ref ? `Near ${ref.label}` : "No exit in view yet";
-      kind = v.exit_visible || sign(v.target_arrow) ? "ok" : "unknown";
-    } else if (!ref) {
-      if (sign(v.target_arrow)) { view = { arrow: DIR_ARROW[v.target_arrow], instruction: DIR_WORD[v.target_arrow], detail: `Sign points to ${t.label}` }; status = "Following sign"; }
-      else { view = { arrow: "scan", instruction: "LOOK AROUND", detail: "Face a room number" }; status = "No room number in view"; kind = "unknown"; }
-    } else if (ref.bldg !== t.bldg) {
-      const a = sign(v.target_arrow) ? v.target_arrow : null;
-      view = { arrow: a ? DIR_ARROW[a] : "scan", instruction: "OTHER BUILDING", detail: `${t.label} is in building ${t.bldg}` };
-      status = `You're in building ${ref.bldg} (${ref.label})`; kind = "warn";
-    } else if (ref.floor !== t.floor) {
-      const up = t.floor > ref.floor, n = Math.abs(t.floor - ref.floor);
-      const via = sign(v.elevator_arrow) ? ["Elevator", v.elevator_arrow] : sign(v.stairs_arrow) ? ["Stairs", v.stairs_arrow] : null;
-      view = via && !["here", "up", "down"].includes(via[1])
-        ? { arrow: DIR_ARROW[via[1]], instruction: via[1] === "straight" ? `${via[0].toUpperCase()} AHEAD` : `${via[0].toUpperCase()} ${via[1].toUpperCase()}`, detail: `Go ${up ? "up" : "down"} to floor ${t.floor}` }
-        : { arrow: up ? "up" : "down", instruction: up ? "GO UPSTAIRS" : "GO DOWNSTAIRS", detail: `${n} floor${n > 1 ? "s" : ""}, to floor ${t.floor}${via ? ` · ${via[0]} here` : ""}` };
-      status = `On floor ${ref.floor} (${ref.label})`;
-    } else {
-      const doors = Math.max(1, Math.round(Math.abs(t.num - ref.num) / 2));
-      const doorsTxt = `${t.label}: about ${doors} door${doors > 1 ? "s" : ""}`;
-      if (sign(v.target_arrow)) view = { arrow: DIR_ARROW[v.target_arrow], instruction: DIR_WORD[v.target_arrow], detail: `Sign points to ${t.label}` };
-      else if (v.numbers_increase !== "unknown") {
-        const way = t.num > ref.num ? v.numbers_increase : OPPOSITE[v.numbers_increase];
-        view = { arrow: DIR_ARROW[way], instruction: DIR_WORD[way], detail: doorsTxt };
-      } else if (s.room.last && s.room.last.floor === ref.floor && s.room.last.num !== ref.num) {
-        const closer = Math.abs(t.num - ref.num) < Math.abs(t.num - s.room.last.num);
-        view = closer ? { arrow: "straight", instruction: "KEEP GOING", detail: doorsTxt } : { arrow: "back", instruction: "TURN AROUND", detail: `Wrong way · ${doorsTxt}` };
-        if (!closer) { s.wrongTurns += 1; entry.result = "wrong-turn"; }
-      } else {
-        view = { arrow: "scan", instruction: "WALK & LOOK", detail: `${t.label} is ${t.num < ref.num ? "lower" : "higher"} than ${ref.label}` };
-        kind = "unknown";
+    const placeHit = TARGET_PLACE[t.kind] && v.places.filter((p) => TARGET_PLACE[t.kind].includes(p.kind)).sort((x, y) => y.close - x.close)[0];
+    if (!view && placeHit) {
+      const pos = placeHit.position;
+      if (placeHit.close && !(t.kind === "exit" && R.outdoorDest)) {
+        return arrive(`${t.label} ${posWords(pos)}`, `At the ${t.label.toLowerCase()}`, `${t.label}, ${posWords(pos)}.`);
       }
-      status = `Seeing ${ref.label}`;
+      bearingOut = h != null ? norm360(h + POS_OFFSET[pos]) : null;
+      view = { arrow: pos === "center" ? "straight" : pos, instruction: `${SHORT_NAME[t.kind]} ${pos === "center" ? "AHEAD" : pos.toUpperCase()}`, detail: short(placeHit.cue || "Walk to it", 40) };
+      status = `${t.label} in view`;
+      spoken = `${t.label} ${pos === "center" ? "ahead" : `to your ${pos}`}.`;
     }
-    if (ref) s.room.last = ref;
-    entry.result = entry.result ?? (ref ? "located" : "unverified");
-    entry.label = ref ? ref.label : seen.length ? "" : "no room number";
+
+    // 2) Routed on the real building plan (City Tech Academic Complex).
+    if (!view && t.model) {
+      const a = indoor.anchorFromRead(t.model, v, R.at, R.floor ?? null);
+      if (a && (a.close || !R.at || Date.now() - (R.atTs ?? 0) > 20000)) {
+        if (a.id !== R.at) R.followed = new Set(); // new place: start counting followed legs again
+        R.at = a.id; R.atTs = Date.now(); R.atLabel = a.label; R.ambiguous = a.ambiguous ?? null;
+        if (a.via === "room" || a.floorUnique) R.floor = a.floor; // a plaque or a one-floor landmark confirms the floor
+      }
+      if (R.at) {
+        R.followed ??= new Set();
+        const g = indoor.guide(t.model, R.at, t.nodes, h, { anchorJustSeen: Boolean(a && a.id === R.at), followed: R.followed });
+        if (g?.compass && g.legKey && Math.abs(g.rel) < 40) { R.followed.add(g.legKey); R.ambiguous = null; } // facing along it = walking it
+        R.path = g?.path ?? null;
+        if (g?.arrived && t.viaLift) {
+          // At the lifts for a room on a floor the plan doesn't cover: send them up, then read room numbers there.
+          const up = t.room.floor > 1;
+          view = { arrow: up ? "up" : "down", instruction: up ? "GO UP" : "GO DOWN", detail: `to floor ${t.room.floor}, then find ${t.room.label}` };
+          spoken = `Take the elevator to floor ${t.room.floor}, then look for ${t.room.label}.`;
+          status = `At the ${t.model.byId[R.at].label?.toLowerCase() ?? "elevators"}`;
+          R.target = { ...t, model: null, nodes: null, viaLift: false }; // next frames: room-number logic on that floor
+          R.at = null;
+        } else if (g?.arrived) {
+          return arrive(t.label, `At ${t.label}`, `You're at ${t.label}.`);
+        } else if (g) {
+          // Room with two doors and nothing else in view to say which: only commit if both doors agree.
+          // (Only when placing them from this frame; once they've followed a leg, the walk itself disambiguates.)
+          const placing = Boolean(a && a.id === R.at) && !(R.followed?.size > 0);
+          const others = placing ? (R.ambiguous ?? []).filter((id) => id !== R.at).map((id) => indoor.guide(t.model, id, t.nodes, h)) : [];
+          if (others.some((o) => o && !o.arrived && o.instruction !== g.instruction)) {
+            view = { arrow: "scan", instruction: "WHICH DOOR?", detail: short(`${R.atLabel} has 2 doors: face the next sign or door`, 42) };
+            kind = "unknown"; phase = "looking"; status = `Near ${R.atLabel}`;
+            spoken = `${R.atLabel} has two doors. Look at the next door or sign so I can place you.`;
+          } else {
+            view = { arrow: g.arrow, instruction: g.instruction, detail: short(g.detail, 42) };
+            bearingOut = g.compass ? g.bearing : null;
+            status = short(`Near ${R.atLabel}`, 40);
+            spoken = g.spoken;
+            if (g.floorHop) R.floor = null; // changing floors: re-confirm the floor from the next plaque
+          }
+        }
+      }
+    }
+
+    // 3) No plan for this target (or not placed yet): room-number logic + signs + compass memory.
+    if (!view) {
+      const ref = seen.find((r) => r.position === "center") ?? [...seen].sort((x, y) => Math.abs(x.num - (t.room?.num ?? 0)) - Math.abs(y.num - (t.room?.num ?? 0)))[0];
+      const signArrow = (kinds, test = () => true) => v.signs.find((sg) => kinds.includes(sg.kind) && sg.arrow !== "none" && test(sg))?.arrow ?? "none";
+      const inRange = (sg) => {
+        if (!t.room) return false;
+        const nums = [...sg.text.toUpperCase().matchAll(/([A-Z]{1,2})?\s*-?\s*(\d{3,4})/g)].map((m) => ({ b: m[1], n: Number(m[2]) }));
+        if (!nums.length || nums.some((x) => x.b && x.b !== t.room.bldg)) return false;
+        const lo = Math.min(...nums.map((x) => x.n)), hi = Math.max(...nums.map((x) => x.n));
+        return nums.length === 1 ? lo === t.room.num : t.room.num >= lo && t.room.num <= hi;
+      };
+      const remembered = (kinds) => kinds.map((k) => R.mem[k]).filter((m) => m && Date.now() - m.ts < 90000).sort((x, y) => y.ts - x.ts)[0];
+
+      if (t.kind !== "room") {
+        const sa = signArrow([{ exit: "exit", restroom: "restroom", elevator: "elevator", escalator: "elevator", stairs: "stairs" }[t.kind] ?? "other"]);
+        const mem = TARGET_PLACE[t.kind] && remembered(TARGET_PLACE[t.kind]);
+        if (sa !== "none") { view = { arrow: DIR_ARROW[sa], instruction: DIR_WORD[sa], detail: `Follow the ${t.label.toLowerCase()} sign` }; status = "Following a sign"; }
+        else if (mem && h != null) {
+          const w = indoor.relWords(indoor.turnAngle(h, mem.bearing));
+          view = { arrow: w.arrow, instruction: w.word, detail: short(`${t.label} was this way${mem.cue ? ": " + mem.cue : ""}`, 42) };
+          bearingOut = mem.bearing; status = `Remembered the ${t.label.toLowerCase()}`;
+        }
+      } else if (!ref) {
+        const ta = signArrow(["room_range", "other"], inRange);
+        if (ta !== "none") { view = { arrow: DIR_ARROW[ta], instruction: DIR_WORD[ta], detail: `Sign points to ${t.room.label}` }; status = "Following a sign"; }
+      } else if (ref.bldg !== t.room.bldg) {
+        view = { arrow: "scan", instruction: "OTHER BUILDING", detail: `${t.room.label} is in building ${t.room.bldg}` };
+        status = `You're in building ${ref.bldg} (${ref.label})`; kind = "warn";
+      } else if (ref.floor !== t.room.floor) {
+        const up = t.room.floor > ref.floor, n = Math.abs(t.room.floor - ref.floor);
+        const lift = v.places.find((p) => p.kind === "elevators") ?? v.places.find((p) => p.kind === "escalator") ?? v.places.find((p) => p.kind === "stairs");
+        const la = signArrow(["elevator", "stairs"]);
+        if (lift) {
+          view = { arrow: lift.position === "center" ? "straight" : lift.position, instruction: `${lift.kind.toUpperCase()} ${lift.position === "center" ? "AHEAD" : lift.position.toUpperCase()}`, detail: `Go ${up ? "up" : "down"} to floor ${t.room.floor}` };
+          if (h != null) bearingOut = norm360(h + POS_OFFSET[lift.position]);
+        } else if (la !== "none") view = { arrow: DIR_ARROW[la], instruction: DIR_WORD[la], detail: `Sign to the ${up ? "upper" : "lower"} floors` };
+        else view = { arrow: up ? "up" : "down", instruction: up ? "GO UPSTAIRS" : "GO DOWNSTAIRS", detail: `${n} floor${n > 1 ? "s" : ""}, to floor ${t.room.floor}` };
+        status = `On floor ${ref.floor} (${ref.label})`;
+      } else {
+        // Same floor: which way do the numbers grow? From this frame, the compass memory, or the walking order.
+        const fk = `${ref.bldg}${ref.floor}`;
+        if (v.numbers_increase !== "unknown" && h != null) R.mem.inc[fk] = { bearing: norm360(h + DIR_OFFSET[v.numbers_increase]), ts: Date.now() };
+        if (!R.mem.inc[fk] && R.last && R.last.floor === ref.floor && R.last.num !== ref.num && h != null && Date.now() - (R.lastTs ?? 0) < 60000 && Math.abs(ref.num - R.last.num) <= 20) {
+          R.mem.inc[fk] = { bearing: norm360(ref.num > R.last.num ? h : h + 180), ts: Date.now(), fromWalking: true };
+        }
+        const doors = Math.max(1, Math.round(Math.abs(t.room.num - ref.num) / 2));
+        const doorsTxt = `${t.room.label}: about ${doors} door${doors > 1 ? "s" : ""}`;
+        const ta = signArrow(["room_range", "other"], inRange);
+        const inc = R.mem.inc[fk];
+        if (ta !== "none") view = { arrow: DIR_ARROW[ta], instruction: DIR_WORD[ta], detail: `Sign points to ${t.room.label}` };
+        else if (v.numbers_increase !== "unknown") {
+          const way = t.room.num > ref.num ? v.numbers_increase : OPPOSITE[v.numbers_increase];
+          view = { arrow: DIR_ARROW[way], instruction: DIR_WORD[way], detail: doorsTxt };
+          if (h != null) bearingOut = norm360(h + DIR_OFFSET[way]);
+        } else if (inc && h != null && Date.now() - inc.ts < 180000) {
+          const want = norm360(inc.bearing + (t.room.num > ref.num ? 0 : 180));
+          const w = indoor.relWords(indoor.turnAngle(h, want));
+          view = { arrow: w.arrow, instruction: w.word, detail: doorsTxt };
+          bearingOut = want;
+        } else if (R.last && R.last.floor === ref.floor && R.last.num !== ref.num) {
+          const closer = Math.abs(t.room.num - ref.num) < Math.abs(t.room.num - R.last.num);
+          view = closer ? { arrow: "straight", instruction: "KEEP GOING", detail: doorsTxt } : { arrow: "back", instruction: "TURN AROUND", detail: `Wrong way · ${doorsTxt}` };
+          if (!closer) { s.wrongTurns += 1; entry.result = "wrong-turn"; }
+        } else {
+          view = { arrow: "scan", instruction: "WALK & LOOK", detail: `${t.room.label} is ${t.room.num < ref.num ? "lower" : "higher"} than ${ref.label}` };
+          kind = "unknown";
+        }
+        status = `Seeing ${ref.label}`;
+      }
+      if (ref) { R.last = ref; R.lastTs = Date.now(); }
+    }
+
+    if (!view) {
+      view = { arrow: "scan", instruction: "LOOK AROUND", detail: t.model ? "Face a room number or the turnstiles" : t.kind === "exit" ? "Turn to find doors outside" : t.kind === "room" ? "Face a room number" : `Look for ${t.label.toLowerCase()} signs` };
+      kind = "unknown"; phase = "looking";
+      status = t.model ? "Finding you on the City Tech plan" : `No ${t.kind === "room" ? "room number" : t.label.toLowerCase()} in view yet`;
+    }
+
+    // Speak only when the instruction changes (or every 15 s while it holds), not on every frame.
+    const key = `${view.instruction}|${phase}`;
+    let say = "";
+    if (key !== R.spokenKey || Date.now() - (R.spokenAt ?? 0) > 15000) {
+      say = spoken || `${view.instruction.toLowerCase()}. ${view.detail}.`;
+      R.spokenKey = key; R.spokenAt = Date.now();
+    }
+    entry.result = entry.result ?? (phase === "looking" ? "unverified" : "located");
+    entry.label = entry.label ?? (R.atLabel ?? seen[0]?.label ?? (v.places[0]?.kind.replace("_", " ") || "nothing recognised"));
     s.roomView = view;
-    speak = `${view.instruction.toLowerCase()}. ${view.detail}.`;
-    s.history.push(entry);
-    return { read: v, ms, card: emit(kind, status, { speak, phoneDetail: `${status}. ${view.instruction}: ${view.detail}.` }), state: state() };
+    return finish(emit(kind, status, {
+      speak: say,
+      phoneDetail: `${status}. ${view.instruction}: ${view.detail}.`,
+      navExtra: { phase, target: t.label, seen: seenOut, ...(bearingOut != null ? { aheadBearing: Math.round(bearingOut) } : {}) },
+    }));
   }
 
   async function planObserve(image) {
@@ -782,7 +970,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     if (busy) return { busy: true };
     if (s.room && !s.room.done && !s.outdoor) {
       if (inflight >= 2) return { busy: true };
-      return roomObserve(image);
+      return indoorObserve(image);
     }
     if (s.plan && !s.outdoor) return planObserve(image);
     const r = route();
@@ -1002,7 +1190,37 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     return { ok: true };
   }
 
+  function noteFrame(image, source) {
+    if (image) { live.frame = image; live.frameTs = Date.now(); live.source = source; }
+  }
+  function liveInfo() {
+    const R = s?.room;
+    return {
+      ts: live.ts, frameTs: live.frameTs, source: live.source, read: live.read,
+      view: live.view ?? s?.lastCard?.nav ?? null,
+      heading,
+      memory: R ? { at: R.atLabel ?? null, increase: R.mem?.inc ?? {}, places: Object.fromEntries(Object.entries(R.mem ?? {}).filter(([k]) => k !== "inc")) } : null,
+    };
+  }
+
+  // The real plan for the phone's map: image + node positions, plus where the wearer is and the planned path.
+  function planInfo() {
+    const m = models[0];
+    if (!m) return null;
+    const R = s?.room;
+    return {
+      building: m.name, source: m.source,
+      image: m.image ? { url: "/api/indoor/plan.jpg", width: m.image.width, height: m.image.height } : null,
+      nodes: m.nodes.map(({ id, x, y, floor, kind, label, room, near }) => ({ id, x, y, floor, kind, label: label ?? room ?? near ?? null })),
+      edges: m.edges.map(([a, b]) => [a, b]),
+      trip: R && R.target.model === m ? { target: R.target.label, targetNodes: R.target.nodes, at: R.at ?? null, path: R.path ?? null, floor: R.floor ?? null, done: Boolean(R.done) } : null,
+    };
+  }
+  const planImageFile = () => (models[0]?.image ? path.join(path.dirname(routesFile), "citytech", models[0].image.file) : null);
+
   return {
+    planInfo, planImageFile,
+    noteFrame, liveInfo, liveFrame: () => live.frame, places: () => indoor.placesList(models),
     setHeading,
     get heading() { return heading; },
     loadRoutes, deleteRoute, listPlans, addPlan, planImage, deletePlan,

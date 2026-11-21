@@ -1,0 +1,595 @@
+{
+  "id": "citytech-ac",
+  "name": "City Tech Academic Complex",
+  "address": "285 Jay Street, Brooklyn, NY 11201",
+  "building": "A",
+  "source": "Traced from City Tech's published floor plan, https://www.citytech.cuny.edu/theater/docs/AC_layout.pdf (page 1, rendered 1546x2000; x/y are positions on that page). Page 2, the architectural drawing of the lobby side, confirms the entrance vestibule, lobby, turnstiles, 4 elevators, escalators and info desk.",
+  "orientation": {
+    "planUpBearing": 92,
+    "why": "The main entrance is on Jay Street at the bottom of the plan. The building stands on the east side of Jay Street (its coordinates are ~32 m east of the street centerline), and Jay Street runs at ~2°/182° (Mapbox/OSM route geometry). So plan-up = into the building = ~92°, plan-right = ~182° (south), plan-left = ~2° (north)."
+  },
+  "nodes": [
+    {
+      "id": "entrance",
+      "floor": 1,
+      "x": 708,
+      "y": 1495,
+      "kind": "exit",
+      "label": "Main Entrance (Jay St)"
+    },
+    {
+      "id": "lobby",
+      "floor": 1,
+      "x": 708,
+      "y": 1408,
+      "kind": "lobby",
+      "label": "the lobby"
+    },
+    {
+      "id": "turnstiles",
+      "floor": 1,
+      "x": 708,
+      "y": 1330,
+      "kind": "turnstiles",
+      "label": "the turnstiles"
+    },
+    {
+      "id": "theater_gates",
+      "floor": 1,
+      "x": 513,
+      "y": 1408,
+      "kind": "turnstiles",
+      "label": "the theater turnstiles"
+    },
+    {
+      "id": "theater_lobby",
+      "floor": 1,
+      "x": 335,
+      "y": 1300,
+      "kind": "lobby",
+      "label": "Theater & gym lobby"
+    },
+    {
+      "id": "theater_restroom",
+      "floor": 1,
+      "x": 370,
+      "y": 1210,
+      "kind": "restroom",
+      "label": "Bathrooms (theater side)"
+    },
+    {
+      "id": "theater_stairs",
+      "floor": 1,
+      "x": 330,
+      "y": 1150,
+      "kind": "stairs",
+      "label": "Stairs to 2nd floor lounge"
+    },
+    {
+      "id": "gym_stairs",
+      "floor": 1,
+      "x": 288,
+      "y": 1272,
+      "kind": "stairs",
+      "label": "Stairs to gym"
+    },
+    {
+      "id": "c_west",
+      "floor": 1,
+      "x": 643,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "the escalator",
+      "into": "the corridor"
+    },
+    {
+      "id": "c_entry",
+      "floor": 1,
+      "x": 708,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "the turnstiles",
+      "into": "the corridor"
+    },
+    {
+      "id": "c_elev",
+      "floor": 1,
+      "x": 750,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "the elevators"
+    },
+    {
+      "id": "c_a105a",
+      "floor": 1,
+      "x": 828,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "A105"
+    },
+    {
+      "id": "c_wc",
+      "floor": 1,
+      "x": 862,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "the bathrooms"
+    },
+    {
+      "id": "c_mid",
+      "floor": 1,
+      "x": 948,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "the hall to A106 & A104",
+      "into": "the corridor"
+    },
+    {
+      "id": "c_a105b",
+      "floor": 1,
+      "x": 1070,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "A105"
+    },
+    {
+      "id": "c_p2",
+      "floor": 1,
+      "x": 1120,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "A104",
+      "into": "the corridor"
+    },
+    {
+      "id": "c_a103a",
+      "floor": 1,
+      "x": 1178,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "A103"
+    },
+    {
+      "id": "c_east",
+      "floor": 1,
+      "x": 1258,
+      "y": 1283,
+      "kind": "corridor",
+      "near": "the end of the corridor"
+    },
+    {
+      "id": "escalator",
+      "floor": 1,
+      "x": 643,
+      "y": 1160,
+      "kind": "escalator",
+      "label": "Escalator to 2nd floor"
+    },
+    {
+      "id": "elevators",
+      "floor": 1,
+      "x": 750,
+      "y": 1150,
+      "kind": "elevators",
+      "label": "Elevators"
+    },
+    {
+      "id": "restroom",
+      "floor": 1,
+      "x": 862,
+      "y": 1268,
+      "kind": "restroom",
+      "label": "Bathrooms"
+    },
+    {
+      "id": "p_mid",
+      "floor": 1,
+      "x": 948,
+      "y": 1138,
+      "kind": "corridor",
+      "near": "A106 & A104"
+    },
+    {
+      "id": "p_east",
+      "floor": 1,
+      "x": 1120,
+      "y": 1138,
+      "kind": "corridor",
+      "near": "A104"
+    },
+    {
+      "id": "a105_d1",
+      "floor": 1,
+      "x": 828,
+      "y": 1313,
+      "kind": "door",
+      "room": "A105",
+      "context": [
+        "restroom",
+        "elevators",
+        "A106",
+        "turnstiles"
+      ]
+    },
+    {
+      "id": "a105_d2",
+      "floor": 1,
+      "x": 1070,
+      "y": 1313,
+      "kind": "door",
+      "room": "A105",
+      "context": [
+        "A104",
+        "A103"
+      ]
+    },
+    {
+      "id": "a103_d1",
+      "floor": 1,
+      "x": 1178,
+      "y": 1313,
+      "kind": "door",
+      "room": "A103",
+      "context": [
+        "A104",
+        "A105"
+      ]
+    },
+    {
+      "id": "a103_d2",
+      "floor": 1,
+      "x": 1258,
+      "y": 1313,
+      "kind": "door",
+      "room": "A103",
+      "context": []
+    },
+    {
+      "id": "a106_d",
+      "floor": 1,
+      "x": 928,
+      "y": 1138,
+      "kind": "door",
+      "room": "A106"
+    },
+    {
+      "id": "a104_d1",
+      "floor": 1,
+      "x": 968,
+      "y": 1138,
+      "kind": "door",
+      "room": "A104",
+      "context": [
+        "A106",
+        "restroom"
+      ]
+    },
+    {
+      "id": "a104_d2",
+      "floor": 1,
+      "x": 1100,
+      "y": 1138,
+      "kind": "door",
+      "room": "A104",
+      "context": [
+        "A103"
+      ]
+    },
+    {
+      "id": "f2_esc",
+      "floor": 2,
+      "x": 1222,
+      "y": 640,
+      "kind": "escalator",
+      "label": "Escalator (2nd floor)"
+    },
+    {
+      "id": "f2_c",
+      "floor": 2,
+      "x": 1222,
+      "y": 675,
+      "kind": "corridor",
+      "near": "the escalator"
+    },
+    {
+      "id": "f2_w",
+      "floor": 2,
+      "x": 1160,
+      "y": 675,
+      "kind": "corridor",
+      "near": "A209"
+    },
+    {
+      "id": "f2_e",
+      "floor": 2,
+      "x": 1340,
+      "y": 675,
+      "kind": "corridor",
+      "near": "A209"
+    },
+    {
+      "id": "f2_elev",
+      "floor": 2,
+      "x": 1355,
+      "y": 575,
+      "kind": "elevators",
+      "label": "Elevators (2nd floor)"
+    },
+    {
+      "id": "a209_d1",
+      "floor": 2,
+      "x": 1160,
+      "y": 693,
+      "kind": "door",
+      "room": "A209"
+    },
+    {
+      "id": "a209_d2",
+      "floor": 2,
+      "x": 1340,
+      "y": 693,
+      "kind": "door",
+      "room": "A209"
+    }
+  ],
+  "edges": [
+    [
+      "entrance",
+      "lobby",
+      "through the entrance doors"
+    ],
+    [
+      "lobby",
+      "turnstiles"
+    ],
+    [
+      "turnstiles",
+      "c_entry",
+      "through the turnstiles"
+    ],
+    [
+      "lobby",
+      "theater_gates"
+    ],
+    [
+      "theater_gates",
+      "theater_lobby",
+      "through the theater turnstiles"
+    ],
+    [
+      "theater_lobby",
+      "theater_restroom"
+    ],
+    [
+      "theater_lobby",
+      "theater_stairs"
+    ],
+    [
+      "theater_lobby",
+      "gym_stairs"
+    ],
+    [
+      "c_west",
+      "c_entry"
+    ],
+    [
+      "c_entry",
+      "c_elev"
+    ],
+    [
+      "c_elev",
+      "c_a105a"
+    ],
+    [
+      "c_a105a",
+      "c_wc"
+    ],
+    [
+      "c_wc",
+      "c_mid"
+    ],
+    [
+      "c_mid",
+      "c_a105b"
+    ],
+    [
+      "c_a105b",
+      "c_p2"
+    ],
+    [
+      "c_p2",
+      "c_a103a"
+    ],
+    [
+      "c_a103a",
+      "c_east"
+    ],
+    [
+      "c_west",
+      "escalator"
+    ],
+    [
+      "c_elev",
+      "elevators"
+    ],
+    [
+      "c_wc",
+      "restroom"
+    ],
+    [
+      "c_mid",
+      "p_mid"
+    ],
+    [
+      "p_mid",
+      "a106_d"
+    ],
+    [
+      "p_mid",
+      "a104_d1"
+    ],
+    [
+      "c_p2",
+      "p_east"
+    ],
+    [
+      "p_east",
+      "a104_d2"
+    ],
+    [
+      "c_a105a",
+      "a105_d1"
+    ],
+    [
+      "c_a105b",
+      "a105_d2"
+    ],
+    [
+      "c_a103a",
+      "a103_d1"
+    ],
+    [
+      "c_east",
+      "a103_d2"
+    ],
+    [
+      "escalator",
+      "f2_esc",
+      "up the escalator",
+      120
+    ],
+    [
+      "elevators",
+      "f2_elev",
+      "up one floor in the elevator",
+      160
+    ],
+    [
+      "f2_esc",
+      "f2_c"
+    ],
+    [
+      "f2_c",
+      "f2_w"
+    ],
+    [
+      "f2_c",
+      "f2_e"
+    ],
+    [
+      "f2_e",
+      "f2_elev"
+    ],
+    [
+      "f2_w",
+      "a209_d1"
+    ],
+    [
+      "f2_e",
+      "a209_d2"
+    ]
+  ],
+  "places": [
+    {
+      "id": "A103",
+      "label": "A103",
+      "kind": "room",
+      "nodes": [
+        "a103_d1",
+        "a103_d2"
+      ]
+    },
+    {
+      "id": "A104",
+      "label": "A104",
+      "kind": "room",
+      "nodes": [
+        "a104_d1",
+        "a104_d2"
+      ]
+    },
+    {
+      "id": "A105",
+      "label": "A105",
+      "kind": "room",
+      "nodes": [
+        "a105_d1",
+        "a105_d2"
+      ]
+    },
+    {
+      "id": "A106",
+      "label": "A106",
+      "kind": "room",
+      "nodes": [
+        "a106_d"
+      ]
+    },
+    {
+      "id": "A209",
+      "label": "A209",
+      "kind": "room",
+      "nodes": [
+        "a209_d1",
+        "a209_d2"
+      ]
+    },
+    {
+      "id": "exit",
+      "label": "Main Entrance (Jay St)",
+      "kind": "exit",
+      "nodes": [
+        "entrance"
+      ]
+    },
+    {
+      "id": "restroom",
+      "label": "Bathrooms",
+      "kind": "restroom",
+      "nodes": [
+        "restroom",
+        "theater_restroom"
+      ]
+    },
+    {
+      "id": "elevator",
+      "label": "Elevators",
+      "kind": "elevators",
+      "nodes": [
+        "elevators",
+        "f2_elev"
+      ]
+    },
+    {
+      "id": "escalator",
+      "label": "Escalator to 2nd floor",
+      "kind": "escalator",
+      "nodes": [
+        "escalator"
+      ]
+    },
+    {
+      "id": "stairs",
+      "label": "Stairs",
+      "kind": "stairs",
+      "nodes": [
+        "theater_stairs",
+        "gym_stairs"
+      ]
+    },
+    {
+      "id": "theater",
+      "label": "Theater & gym lobby",
+      "kind": "lobby",
+      "nodes": [
+        "theater_lobby"
+      ]
+    }
+  ],
+  "image": {
+    "file": "ac_floorplan.jpg",
+    "width": 1546,
+    "height": 2000,
+    "note": "Page 1 of AC_layout.pdf; node x/y are pixels in this image."
+  }
+}
