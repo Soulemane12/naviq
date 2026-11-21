@@ -33,8 +33,9 @@ stop_one() {
   rm -f "$RUN/$1.pid"
 }
 
-# port_pid PORT: the pid listening on 127.0.0.1:PORT, if any.
-port_pid() { ss -ltnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2; }
+# port_pid PORT: the pid listening on 127.0.0.1:PORT, if any.  Always succeeds: under set -e and pipefail,
+# grep finding nothing would otherwise end the script silently at  pid=$(port_pid ...).
+port_pid() { ss -ltnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2 || true; }
 
 wait_http() {
   local url=$1 i
