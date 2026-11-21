@@ -50,7 +50,7 @@ location: where they are on the plan in a few words, e.g. "corridor outside A105
 seen_text: the exact text you read in image 2 (empty if none).`;
 
 const ROOM_READ_SYSTEM = `You are the eyes of a person wearing smart glasses indoors. Report only what is actually in the frame.
-rooms: every room number you can read (door plates, wall plaques), with where it sits in the frame ("left", "center" or "right") and close=true only if that plaque is within a few steps (large in the frame).
+rooms: every room number you can read (door plates, wall plaques), copied exactly as written including any suffix ("A104.02" is a different room from "A104"; never drop the ".02"), with where it sits in the frame ("left", "center" or "right") and close=true only if that plaque is within a few steps (large in the frame).
 numbers_increase: if two or more room numbers are visible, the way the numbers go UP from the wearer's point of view: "left", "right", "ahead" (further down the corridor) or "behind". "unknown" with fewer than two numbers.
 signs: every directional or wayfinding sign you can read: exact text, its arrow ("left", "right", "straight", "up", "down" or "none"), and kind: "room_range" (e.g. "A101-A120"), "exit", "stairs", "elevator", "restroom" or "other".
 places: things you can recognise by how they look or by their sign: "exit_doors" (glass doors to the street, entrance/exit doors, an EXIT sign over doors), "turnstiles" (security gates), "elevators" (elevator doors or call buttons), "escalator", "stairs", "restroom" (restroom door or sign), "info_desk" (security or information desk). For each: position in the frame, close=true if it is within a few steps (large in the frame), and cue: a few words (e.g. "glass doors with EXIT sign, past the turnstiles").
@@ -824,14 +824,15 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       // A landmark alone (exit sign, elevators, turnstiles) isn't unique: there are more of them in the building
       // than on the plan. Room plaques place you; a landmark only moves you if nothing has placed you yet, if the
       // route expects it next, if it's right next to where you are, or if it stays in view close for 3 frames.
-      if (a && a.via === "place" && R.at && a.id !== R.at) {
+      // Same for a room number read from far away (not close): it may be a different suite or misread.
+      if (a && (a.via === "place" || !a.close) && R.at && a.id !== R.at) {
         const key = a.id;
         R.placeStreak = a.close && R.placeStreakId === key ? (R.placeStreak ?? 0) + 1 : a.close ? 1 : 0;
         R.placeStreakId = key;
         const near = (indoor.dijkstra(t.model, R.at).dist[a.id] ?? Infinity) <= 160;
         const expected = Array.isArray(R.path) && R.path.includes(a.id);
         if (!(near || expected || R.placeStreak >= 3)) {
-          console.log(`[indoor] ignoring lone ${a.kind} sighting (would move ${R.at} → ${a.id})`);
+          console.log(`[indoor] ignoring lone ${a.kind ?? `far ${a.label}`} sighting (would move ${R.at} → ${a.id})`);
           a = null;
         }
       } else if (a) { R.placeStreak = 0; R.placeStreakId = null; }

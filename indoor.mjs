@@ -51,11 +51,13 @@ export function planBearing(model, a, b) {
 }
 
 // Room number → building/floor/number. "A105" → { label: "A105", bldg: "A", num: 105, floor: 1 }.
+// "A104.02" is its own room (a suite off A104, somewhere else on the floor): keep the suffix in the label so it
+// never matches A104's doors on the plan. num stays 104 for "numbers go up this way" logic.
 export function parseRoom(t) {
-  const m = /([A-Z]{1,2})\s*-?\s*(\d{3,4})\b/.exec(String(t).toUpperCase());
+  const m = /([A-Z]{1,2})\s*-?\s*(\d{3,4})(?:\s*\.\s*(\d{1,3}))?\b/.exec(String(t).toUpperCase());
   if (!m) return null;
   const num = Number(m[2]);
-  return { label: m[1] + m[2], bldg: m[1], num, floor: Math.floor(num / 100) };
+  return { label: m[1] + m[2] + (m[3] ? `.${m[3]}` : ""), base: m[1] + m[2], sub: m[3] ?? null, bldg: m[1], num, floor: Math.floor(num / 100) };
 }
 
 const KIND_WORDS = [
