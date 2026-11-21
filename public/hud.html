@@ -193,22 +193,44 @@
 
   // ---- compass: which way the wearer's head faces (glasses magnetometer via deviceorientationabsolute) ----
   // Device -z axis (out the back of the display = where the wearer looks), projected on the ground plane.
-  var heading = null, headingAt = 0, lastSentHeading = null, lastSentAt = 0;
+  var heading = null, headingAt = 0, absoluteAt = null, pendingHeading = null;
+  var lastSentHeading = null, lastSentAt = 0;
+  var headingMaxAge = 4000;
+  function compassDelta(from, to) { return ((to - from + 540) % 360) - 180; }
+  function freshHeading() {
+    return heading != null && Date.now() - headingAt < headingMaxAge ? heading : null;
+  }
   function onOrient(e) {
-    if (e.alpha == null || (e.type === "deviceorientation" && !e.absolute)) return;
-    var r = Math.PI / 180, a = e.alpha * r, b = (e.beta || 0) * r, g = (e.gamma || 0) * r;
+    if (!Number.isFinite(e.alpha) || !Number.isFinite(e.beta) || !Number.isFinite(e.gamma)) return;
+    var now = Date.now();
+    if (e.type === "deviceorientation") {
+      if (!e.absolute || (absoluteAt != null && now - absoluteAt < 1500)) return;
+    } else absoluteAt = now;
+    var r = Math.PI / 180, a = e.alpha * r, b = e.beta * r, g = e.gamma * r;
     var east = -Math.cos(a) * Math.sin(g) - Math.sin(a) * Math.sin(b) * Math.cos(g);
     var north = -Math.sin(a) * Math.sin(g) + Math.cos(a) * Math.sin(b) * Math.cos(g);
     if (east * east + north * north < 0.04) return; // facing nearly vertical has no useful horizontal heading
     var h = (Math.atan2(east, north) * 180 / Math.PI + 360) % 360;
-    if (heading == null) heading = h;
-    else { var d = ((h - heading + 540) % 360) - 180; heading = (heading + d * 0.25 + 360) % 360; } // smooth
-    headingAt = Date.now();
+    var age = now - headingAt;
+    if (heading == null || age >= headingMaxAge) heading = h;
+    else {
+      var d = compassDelta(heading, h);
+      // A sudden magnetometer spike must match a second sample before it can swing the arrow.
+      if (Math.abs(d) > 45 && age < 750 &&
+          (!pendingHeading || now - pendingHeading.at > 350 || Math.abs(compassDelta(pendingHeading.deg, h)) > 20)) {
+        pendingHeading = { deg: h, at: now };
+        return;
+      }
+      var weight = 1 - Math.exp(-Math.max(16, age) / 130);
+      heading = (heading + d * weight + 360) % 360;
+    }
+    pendingHeading = null;
+    headingAt = now;
     var sinceSent = headingAt - lastSentAt;
-    var moved = lastSentHeading == null || Math.abs(((heading - lastSentHeading + 540) % 360) - 180) > 5;
-    if (sinceSent > 1000 && (moved || sinceSent > 2400)) {
+    var moved = lastSentHeading == null || Math.abs(compassDelta(lastSentHeading, heading)) > 5;
+    if (onGlasses && sinceSent > 500 && (moved || sinceSent > 1500)) {
       lastSentAt = headingAt; lastSentHeading = heading;
-      fetch("/api/heading", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ h: Math.round(heading) }) }).catch(function () {});
+      fetch("/api/heading", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ h: heading }) }).catch(function () {});
     }
   }
   addEventListener("deviceorientationabsolute", onOrient);
@@ -217,8 +239,9 @@
   // ---- live loop (every 100 ms, no network): rotate the arrow to the real direction, count metres down ----
   var ROT = '<g transform="rotate(ANG 50 50)">' + ARROW + '</g>';
   function headingArrow(nav) {
-    if (heading == null || Date.now() - headingAt >= 2000 || !Number.isFinite(nav.aheadBearing)) return null;
-    var rel = ((nav.aheadBearing - heading + 540) % 360) - 180;
+    var h = freshHeading();
+    if (h == null || !Number.isFinite(nav.aheadBearing)) return null;
+    var rel = compassDelta(h, nav.aheadBearing);
     return ROT.replace("ANG", rel.toFixed(0));
   }
   setInterval(function () {
@@ -338,6 +361,7 @@
       var s = Math.min(1, 1280 / Math.max(v.videoWidth, v.videoHeight));
       c.width = Math.round(v.videoWidth * s); c.height = Math.round(v.videoHeight * s);
       c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+      var frameHeading = onGlasses && !pendingHeading ? freshHeading() : null;
       var dataUrl = c.toDataURL("image/jpeg", 0.85);
       snapping = false; // frame captured: the next look can start while this one is being answered
       if (!document.body.classList.contains("navon")) setMeta("Reading scene…");
@@ -345,7 +369,7 @@
       return fetch("/api/snap", {
         method: "POST", headers: { "content-type": "application/json" },
         signal: controller.signal,
-        body: JSON.stringify({ text: text || "", image: dataUrl })
+        body: JSON.stringify({ text: text || "", image: dataUrl, heading: frameHeading })
       });
     }).then(function (r) { return r ? r.json() : null; })
       .then(function (out) {

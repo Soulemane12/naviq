@@ -249,6 +249,7 @@
       await api("/api/naviq/loc", sample, controller.signal);
       deliveredFix = sample.sampleAt;
       if (fix === sample) gpsStatus(`GPS ±${Math.round(sample.acc)} m`, "on");
+      if (state.active && state.outdoor) refresh();
     } catch {
       if (fix === sample) gpsStatus("GPS upload retrying", "bad");
     } finally {
@@ -264,7 +265,7 @@
     fix = { lat, lon, acc, speed: speed ?? undefined, sampleAt };
     if (!deliveredFix) gpsStatus("Sending location…");
     sendFix();
-    drawMe();
+    if (!state.active || !state.outdoor) drawMe();
   }
   function startGps() {
     if (!window.isSecureContext) return gpsStatus("GPS needs HTTPS", "bad");
@@ -512,9 +513,14 @@
   let routeGeometry = "", mapDestination = "";
   function mapPosition() {
     const now = Date.now();
-    if (fix && now - fix.sampleAt < 30000) return fix;
+    const followingRoute = state.active && state.outdoor;
     const received = state.fix;
-    return received && now - received.ts < 30000 && Number.isFinite(received.lat) && Number.isFinite(received.lon) ? received : null;
+    const receivedAt = received?.sampleAt ?? received?.ts;
+    const serverPosition = Number.isFinite(receivedAt) && now - receivedAt < (followingRoute ? 10000 : 30000)
+      && Number.isFinite(received?.lat) && Number.isFinite(received?.lon) ? received : null;
+    // The marker and route directions use the same fix during a trip.
+    if (followingRoute) return serverPosition;
+    return fix && now - fix.sampleAt < 30000 ? fix : serverPosition;
   }
   function drawMap() {
     const o = state.outdoor;
@@ -560,7 +566,7 @@
     if (!mapMe) {
       mapMe = L.circleMarker(coords, { radius: 7, color: "#2563eb", fillOpacity: 1 }).addTo(map);
       if (!state.outdoor.line?.length) map.setView(coords, 17);
-    } else mapMe.setLatLng(coords);
+    } else if (!mapMe.getLatLng().equals(coords)) mapMe.setLatLng(coords);
   }
 
   function renderSteps() {
@@ -739,7 +745,10 @@
   startGps();
   renderRecent();
   refresh().catch((e) => err(e.message));
-  setInterval(() => { if (state.active) $("stime").textContent = fmt(Date.now() - state.startedAt); }, 1000);
+  setInterval(() => {
+    if (state.active) $("stime").textContent = fmt(Date.now() - state.startedAt);
+    if (mapMe && state.outdoor) drawMe();
+  }, 1000);
 </script>
 </body>
 </html>
