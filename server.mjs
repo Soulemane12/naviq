@@ -494,6 +494,11 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, nav.addSteps(Number(n)));
       }
       // Wearer confirms "I'm facing the right way" → calibrate the active compass to the route direction.
+      // "I'm here": tap on the phone's floor plan → { x, y } in plan pixels (or { node }).
+      case "POST /api/indoor/at": {
+        const body = await readJson(req);
+        return send(res, 200, nav.setIndoorAt({ x: Number(body.x), y: Number(body.y), node: body.node }));
+      }
       case "POST /api/heading/align":
         return send(res, 200, nav.alignHeading());
       case "GET /api/heading":

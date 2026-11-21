@@ -755,6 +755,35 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     saveStride();
   }
 
+  // "I'm here": the wearer taps their spot on the phone's floor plan. Snap to the nearest place on the plan,
+  // re-plan from there, and restart step counting from it (a manual fix when vision/steps got it wrong).
+  function setIndoorAt({ x, y, node } = {}) {
+    if (!s || s.done || !s.room || s.outdoor) start({ room: "where" });
+    const R = s.room, t = R.target, m = t.model ?? models[0];
+    if (!m) return { ok: false, error: "No floor plan loaded" };
+    if (!t.model) Object.assign(t, { model: m, nodes: t.nodes ?? [] });
+    const floor = R.floor ?? 1;
+    let n = node ? m.byId[node] : null;
+    if (!n && Number.isFinite(x) && Number.isFinite(y)) {
+      let best = Infinity;
+      for (const c of m.nodes) { if (c.floor !== floor) continue; const d = Math.hypot(c.x - x, c.y - y); if (d < best) { best = d; n = c; } }
+      if (best > 120) return { ok: false, error: "Tap closer to a hallway, door or landmark" };
+    }
+    if (!n) return { ok: false, error: "Tap your spot on the floor plan" };
+    const label = (n.room ?? n.label ?? n.near ?? n.id).replace(/^the /i, "");
+    Object.assign(R, { at: n.id, atLabel: label, seenTs: Date.now(), ambiguous: null, est: null, lock: null, anchorCandidate: null, floor: n.floor, near: null });
+    R.trail ??= []; if (R.trail.at(-1)?.id !== n.id) R.trail.push({ id: n.id, ts: Date.now() });
+    const g = t.nodes?.length ? indoor.guide(m, n.id, t.nodes, trueFacingNow(), {}) : null;
+    R.path = g?.path ?? null;
+    const view = g && !g.arrived
+      ? { arrow: g.arrow, instruction: g.instruction, detail: short(g.detail, 42) }
+      : g?.arrived ? { arrow: "arrive", instruction: "ARRIVED", detail: t.label } : { arrow: "arrive", instruction: short(`AT ${label.toUpperCase()}`, 18), detail: "set from your phone" };
+    s.roomView = view;
+    console.log(`[indoor] location set by wearer: ${n.id} (${label})`);
+    emit("ok", short(`Set by you: ${label}`, 40), { speak: `Got it, you're at ${label}.${g && !g.arrived ? ` ${g.spoken}` : ""}`, navExtra: { phase: "guiding", target: t.label } });
+    return { ok: true, at: n.id, label };
+  }
+
   // "I'm facing the right way": the wearer confirms they face along the route right now. That's ground truth:
   // correct whichever compass is in charge so this direction reads as straight.
   function alignHeading() {
@@ -1677,7 +1706,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   const planImageFile = () => (models[0]?.image ? path.join(path.dirname(routesFile), "citytech", models[0].image.file) : null);
 
   return {
-    alignHeading,
+    alignHeading, setIndoorAt,
     resetCalibration: () => { Object.assign(cal, { offset: 0, n: 0, errs: [], lastDoor: null, lastTs: 0, pending: null }); return { ok: true }; },
     calibration: () => ({ offset: Math.round(cal.offset), samples: cal.n, raw: heading ? Math.round(heading.deg) : null }),
     planInfo, planImageFile,
