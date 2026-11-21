@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NAVIQ · Where am I</title>
+<style>
+  :root {
+    --bg: #f4f5f2; --card: #ffffff; --ink: #14171a; --muted: #5d6670; --line: #d9ddd6;
+    --accent: #1f6feb; --accent-soft: rgba(31, 111, 235, 0.18); --ok: #1a7f37; --warn: #9a6700;
+    --edge: rgba(20, 23, 26, 0.35); --trail: #8250df;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --card: #161b22; --ink: #e6edf3; --muted: #8b949e; --line: #30363d;
+      --accent: #58a6ff; --accent-soft: rgba(88, 166, 255, 0.22); --ok: #3fb950; --warn: #d29922;
+      --edge: rgba(230, 237, 243, 0.4); --trail: #bc8cff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 14px 16px 32px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  h1 { font-size: 20px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .status { margin: 12px 0; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  .status b { font-size: 22px; display: block; }
+  .status .meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .status.ok b { color: var(--ok); }
+  .status.stale b { color: var(--warn); }
+  .map { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  svg { display: block; width: 100%; height: auto; }
+  .plan-img { opacity: 0.55; }
+  @media (prefers-color-scheme: dark) { .plan-img { opacity: 0.35; filter: invert(1) hue-rotate(180deg); } }
+  .edge { stroke: var(--edge); stroke-width: 3; stroke-linecap: round; }
+  .node { fill: var(--muted); }
+  .lbl { fill: var(--ink); font-size: 15px; font-weight: 600; paint-order: stroke; stroke: var(--card); stroke-width: 4px; }
+  .trail { fill: none; stroke: var(--trail); stroke-width: 5; stroke-dasharray: 2 9; stroke-linecap: round; }
+  .route { fill: none; stroke: var(--accent); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; opacity: 0.6; }
+  #me { transition: transform 0.6s ease; }
+  .me-dot { fill: var(--accent); stroke: #fff; stroke-width: 4; }
+  .me-halo { fill: var(--accent-soft); animation: pulse 1.6s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+  .cone { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  @keyframes pulse { from { transform: scale(0.6); opacity: 1; } to { transform: scale(1.6); opacity: 0; } }
+  .row { display: flex; gap: 10px; margin: 12px 0; flex-wrap: wrap; }
+  button { flex: 1 1 140px; min-height: 46px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); font: inherit; font-weight: 600; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .see { display: grid; grid-template-columns: 140px 1fr; gap: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px; align-items: start; }
+  .see img { width: 140px; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 8px; background: var(--line); }
+  .see h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 4px; }
+  .chips span { display: inline-block; margin: 0 6px 6px 0; padding: 3px 8px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); font-size: 13px; }
+  .err { color: var(--warn); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Where am I</h1>
+    <span class="sub" id="bldg">City Tech</span>
+  </header>
+
+  <div class="status" id="status"><b id="where">Not tracking</b><div class="meta" id="meta">Tap “Start tracking”, then look at a room number.</div></div>
+
+  <div class="map"><svg id="svg" viewBox="0 0 100 40" aria-label="Floor plan with your position"></svg></div>
+
+  <div class="row">
+    <button class="primary" id="start">Start tracking</button>
+    <button id="stop">Stop</button>
+    <button id="reset">Reset compass</button>
+  </div>
+
+  <div class="see">
+    <img id="frame" alt="Latest glasses camera frame">
+    <div>
+      <h2>Glasses see</h2>
+      <div class="chips" id="chips"><span>—</span></div>
+      <div class="err" id="err"></div>
+    </div>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+let plan = null, built = false, byId = {};
+const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+
+function bbox(nodes, pad) {
+  const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y);
+  const x0 = Math.min(...xs) - pad, y0 = Math.min(...ys) - pad;
+  return [x0, y0, Math.max(...xs) + pad - x0, Math.max(...ys) + pad - y0];
+}
+
+const SIDE = /^(theater|gym)/; // theater/gym wing: only zoom out to it when they're over there
+function build(floor, wide) {
+  const svg = $("svg"); svg.innerHTML = "";
+  const nodes = plan.nodes.filter((n) => n.floor === floor);
+  svg.setAttribute("viewBox", bbox(wide ? nodes : nodes.filter((n) => !SIDE.test(n.id)), 60).join(" "));
+  if (plan.image) el("image", { href: plan.image.url, x: 0, y: 0, width: plan.image.width, height: plan.image.height, class: "plan-img" }, svg);
+  for (const [a, b] of plan.edges) {
+    const A = byId[a], B = byId[b];
+    if (A.floor === floor && B.floor === floor) el("line", { x1: A.x, y1: A.y, x2: B.x, y2: B.y, class: "edge" }, svg);
+  }
+  el("polyline", { id: "route", class: "route", points: "" }, svg);
+  el("polyline", { id: "trail", class: "trail", points: "" }, svg);
+  const shown = new Set();
+  for (const n of nodes) {
+    if (n.kind === "corridor") continue;
+    el("circle", { cx: n.x, cy: n.y, r: 5, class: "node" }, svg);
+    const name = (n.label || "").replace(/^the /i, "");
+    if (!name || shown.has(name + n.kind) || n.id === "lobby" || n.id === "double_doors") continue;
+    shown.add(name + n.kind);
+    const t = el("text", { x: n.x + 8, y: n.kind === "door" ? n.y + 22 : n.y - 9, class: "lbl" }, svg);
+    t.textContent = name.length > 18 ? name.slice(0, 17) + "…" : name;
+  }
+  const me = el("g", { id: "me", style: "display:none" }, svg);
+  el("path", { id: "cone", class: "cone", d: "M0 0 L-34 -90 A96 96 0 0 1 34 -90 Z", style: "display:none" }, me);
+  el("circle", { r: 26, class: "me-halo" }, me);
+  el("circle", { r: 11, class: "me-dot" }, me);
+}
+
+function render(p) {
+  plan = p; byId = {}; for (const n of p.nodes) byId[n.id] = n;
+  $("bldg").textContent = p.building;
+  const trip = p.trip;
+  const at = trip && trip.at ? byId[trip.at] : null;
+  const floor = at ? at.floor : 1;
+  const wide = Boolean(at && SIDE.test(at.id));
+  if (built !== floor + (wide ? "w" : "")) { build(floor, wide); built = floor + (wide ? "w" : ""); }
+
+  const me = $("me");
+  if (at) {
+    me.style.display = "";
+    me.setAttribute("transform", `translate(${at.x} ${at.y})`);
+    me.style.transform = `translate(${at.x}px, ${at.y}px)`;
+  } else me.style.display = "none";
+
+  const cone = $("cone");
+  if (at && p.heading) {
+    const planAngle = p.heading.deg - (p.planUpBearing || 0); // degrees clockwise from "up" on the plan
+    cone.style.display = "";
+    cone.setAttribute("transform", `rotate(${planAngle})`);
+  } else cone.style.display = "none";
+
+  const pts = (ids) => (ids || []).map((id) => byId[id]).filter((n) => n && n.floor === floor).map((n) => `${n.x},${n.y}`).join(" ");
+  $("trail").setAttribute("points", pts(trip ? trip.trail.map((t) => t.id) : []));
+  $("route").setAttribute("points", trip && trip.kind !== "track" ? pts(trip.path) : "");
+
+  const st = $("status");
+  if (!trip) {
+    st.className = "status"; $("where").textContent = "Not tracking";
+    $("meta").textContent = "Tap “Start tracking”, then look at a room number.";
+  } else if (!at) {
+    st.className = "status stale"; $("where").textContent = "Finding you…";
+    $("meta").textContent = "Look at a room number (like A105) for a second.";
+  } else {
+    const name = (at.label || at.id).replace(/^the /i, "");
+    const ago = trip.seenAgoMs == null ? null : Math.round(trip.seenAgoMs / 1000);
+    st.className = "status " + (ago != null && ago <= 10 ? "ok" : "stale");
+    $("where").textContent = (at.kind === "door" ? "At " : "Near ") + name;
+    const bits = [];
+    bits.push(ago == null ? "placed earlier" : ago <= 2 ? "seen just now" : `last seen ${ago}s ago`);
+    if (p.heading) bits.push(`facing ${p.heading.deg}°${p.heading.calibrated ? "" : " (compass not calibrated yet)"}`);
+    if (trip.kind !== "track") bits.push(`to ${trip.target}`);
+    $("meta").textContent = bits.join(" · ");
+  }
+
+  const r = p.read, chips = $("chips");
+  chips.innerHTML = "";
+  const items = r ? [...r.rooms.map((x) => `${x.label} · ${x.position}${x.close ? " · close" : ""}`), ...r.places.map((x) => `${x.kind.replace("_", " ")} · ${x.position}${x.close ? " · close" : ""}`)] : [];
+  for (const t of items.length ? items : [r ? "nothing recognised" : "no recent frame"]) { const s = document.createElement("span"); s.textContent = t; chips.appendChild(s); }
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/indoor/plan", { cache: "no-store" });
+    if (!r.ok) throw new Error("server " + r.status);
+    render(await r.json());
+    $("err").textContent = "";
+  } catch (e) { $("err").textContent = "Can't reach NAVIQ: " + e.message; }
+  setTimeout(poll, 700);
+}
+$("frame").onerror = () => { $("frame").style.visibility = "hidden"; };
+$("frame").onload = () => { $("frame").style.visibility = "visible"; };
+setInterval(() => { $("frame").src = "/api/live/frame?ts=" + Date.now(); }, 1500);
+
+const post = (url, body) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) }).then((r) => r.json());
+$("start").onclick = () => post("/api/naviq/start", { room: "where" }).catch((e) => ($("err").textContent = e.message));
+$("stop").onclick = () => post("/api/naviq/stop").catch(() => {});
+$("reset").onclick = () => post("/api/heading", { reset: true }).catch(() => {});
+poll();
+</script>
+</body>
+</html>
