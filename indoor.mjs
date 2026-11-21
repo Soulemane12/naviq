@@ -287,7 +287,7 @@ function describe(model, p, legs, i, cur, rest, heading, targetName, prevArrow) 
   const rel = turnAngle(heading, cur.bearing);
   const w = relWords(rel, prevArrow);
   const detail = cur.cue ? `${cur.cue}, ${then}` : then;
-  return { arrived: false, bearing: Math.round(cur.bearing), arrow: w.arrow, instruction: w.word, detail, spoken: `${w.spoken}. ${detail}.`, path: p };
+  return { arrived: false, bearing: Math.round(cur.bearing), arrow: w.arrow, instruction: w.word, detail, spoken: `${w.spoken}. ${detail}.`, path: p, rel: Math.round(rel), legKey: `${cur.from}>${cur.to}`, compass: true };
 }
 
 /** Places a phone UI can offer as one-tap destinations. */

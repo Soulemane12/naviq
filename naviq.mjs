@@ -353,8 +353,9 @@ export function createNav({ routesFile, askJSON, broadcast }) {
 
   function startOutdoor(c, toIndex) {
     const to = c.walkTo;
-    s.outdoor = { to, toIndex, line: [], steps: [], stepIdx: 0, view: null, near: false, rerouteAt: 0, waiting: false, routing: false };
-    const fresh = s.fix && Date.now() - (s.fix.sampleAt ?? s.fix.ts) < 10000 && s.fix.acc <= 80;
+    s.outdoor = { to, toIndex, line: [], steps: [], stepIdx: 0, view: null, near: false, rerouteAt: 0, waiting: false, routing: false, waitSince: Date.now() };
+    // Plan only from a good fix: ±62 m next to the building picked the wrong street to start from.
+    const fresh = s.fix && Date.now() - (s.fix.sampleAt ?? s.fix.ts) < 10000 && s.fix.acc <= 30;
     if (fresh) return routeOutdoor(s.fix, "Directions ready");
     s.outdoor.waiting = true;
     s.outdoor.view = { arrow: "scan", instruction: "FINDING YOU", detail: `Walking to ${to.name}` };
@@ -378,7 +379,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       const cum = [0];
       for (let i = 1; i < w.line.length; i++) cum.push(cum[i - 1] + dist(w.line[i - 1], w.line[i]));
       console.log(`[directions] ${w.source}: ${Math.round(w.distance)} m, ${w.steps.length} steps → ${w.steps.map((x) => x.maneuver.type + (x.maneuver.modifier ? "-" + x.maneuver.modifier : "") + (x.name ? "(" + x.name + ")" : "")).join(" → ")}`);
-      Object.assign(o, w, { cum, stepIdx: -1, error: null, near: false, now10: false, remaining: w.distance, lastBucket: null, routing: false });
+      Object.assign(o, w, { cum, stepIdx: -1, error: null, near: false, now10: false, remaining: w.distance, lastBucket: null, routing: false, routedAcc: from.acc ?? 50 });
       updateOutdoor(s.fix ?? from, { reason, force: true }); // the newest accepted fix, not the one we asked with
     } catch (err) {
       if (s?.outdoor !== o) return;
@@ -423,7 +424,10 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     if (!o) return;
     if (o.routing) return; // directions on the way: keep the "getting route" card
     if (o.waiting) {
-      if (fix.acc <= 80) return routeOutdoor(fix, "Got your location");
+      // Good fix (±30 m), or the best we've had after 15 s of waiting (then re-planned once GPS improves).
+      if (fix.acc <= 30 || (fix.acc <= 80 && Date.now() - (o.waitSince ?? 0) > 15000)) return routeOutdoor(fix, "Got your location");
+      o.view = { arrow: "scan", instruction: "FINDING YOU", detail: `GPS ±${Math.round(fix.acc)} m, waiting for a better fix` };
+      emit("gps", `Waiting for better GPS (±${Math.round(fix.acc)} m)`, { navExtra: { phase: "waiting_gps", acc: fix.acc } });
       return;
     }
     if (!o.steps.length) {
@@ -435,6 +439,9 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       emit("gps", `Compass only · GPS ±${Math.round(fix.acc)} m`, { navExtra: { phase: "compass", aheadBearing: Math.round(bearing(fix, o.to)), distM: d, acc: fix.acc, speed: fix.speed ?? 0 } });
       return;
     }
+
+    // Planned from a poor fix and GPS is now much better: plan again from the real start (once).
+    if (!o.refined && o.routedAcc > 30 && fix.acc <= 15) { o.refined = true; return routeOutdoor(fix, "GPS improved, route updated"); }
 
     // Arrival zone shrinks with good GPS: ±6 m → ~14 m, poor GPS → up to the route's 30 m.
     const arriveR = Math.min(o.to.arriveRadius ?? 30, Math.max(12, (fix.acc ?? 30) + 8));
@@ -976,8 +983,23 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     // 2) Routed on the real building plan (City Tech Academic Complex).
     if (!view && t.model) {
       if (R.at) {
-        const g = indoor.guide(t.model, R.at, t.nodes, facing, { prevArrow: s.roomView?.arrow ?? null });
+        let g = indoor.guide(t.model, R.at, t.nodes, facing, { prevArrow: s.roomView?.arrow ?? null });
         R.path = g?.path ?? null;
+        // Leg lock: once they've faced along a straight stretch, keep saying GO STRAIGHT for it. Glancing at the
+        // bathroom on your right, or the indoor compass drifting as you walk past steel, must not flip it to
+        // "TURN LEFT". Only facing backwards for 4 s straight (a real turn-around) breaks the lock.
+        if (g && !g.arrived && g.legKey) {
+          if (R.lock && R.lock.legKey !== g.legKey) R.lock = null;
+          if (!R.lock && Math.abs(g.rel) < 35) R.lock = { legKey: g.legKey, backSince: null };
+          if (R.lock) {
+            R.lock.backSince = Math.abs(g.rel) >= 140 ? R.lock.backSince ?? Date.now() : null;
+            if (R.lock.backSince && Date.now() - R.lock.backSince > 4000) R.lock = null; // really turned around
+            else {
+              if (g.arrow !== "straight") g = { ...g, arrow: "straight", instruction: "GO STRAIGHT", spoken: `Go straight. ${g.detail}.` };
+              g.locked = true; // the HUD shows a plain straight arrow (no drifting compass rotation)
+            }
+          }
+        }
         if (g?.arrived && t.viaLift) {
           // At the lifts for a room on a floor the plan doesn't cover: send them up, then read room numbers there.
           const up = t.room.floor > 1;
@@ -1000,7 +1022,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
             spoken = `${R.atLabel} has two doors. Look at the next door or sign so I can place you.`;
           } else {
             view = { arrow: g.arrow, instruction: g.instruction, detail: short(g.detail, 42) };
-            bearingOut = g.bearing;
+            bearingOut = g.locked ? null : g.bearing;
             status = short(`Near ${R.atLabel}`, 40);
             spoken = g.spoken;
             if (g.floorHop) R.floor = null; // changing floors: re-confirm the floor from the next plaque
