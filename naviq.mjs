@@ -636,6 +636,69 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     if (o && o.steps?.length && !o.routing && lastFix && now - (o.evalAt ?? 0) > 1200) updateOutdoor(lastFix);
     return { ok: true, offset: Math.round(phoneCal.offset) };
   }
+  // ---------- indoor dead reckoning: real steps from the phone's motion sensor move the dot along the plan ----------
+  // Between recognised places (room plaques, signs) the dot walks along the hallway the way they face, snapped
+  // to the plan's corridors. Each new confirmed place snaps it back and teaches the stride (plan px per step).
+  const stride = { px: 7, n: 0 }; // prior ≈ 0.7 m step at ≈10 px/m on City Tech's plan; learned from walks
+  function trueFacingNow() {
+    if (phoneFresh() && !(heading && Date.now() - heading.ts < 4000)) return phone.deg;
+    if (heading && Date.now() - heading.ts < 4000) return norm360(heading.deg + indoorOffset());
+    return phoneFresh() ? phone.deg : null;
+  }
+  function addSteps(n) {
+    const R = s && !s.done ? s.room : null;
+    const m = R?.target.model;
+    if (!R || !m || !R.at || s.outdoor || !(n > 0)) return { ok: true, ignored: true };
+    // (Re)start from the confirmed place; a door is a leaf off the hallway: start in the hallway in front of it.
+    if (!R.est || R.est.anchor !== R.at) {
+      const startNode = m.byId[R.at].kind === "door" ? (m.adj[R.at].map((e) => m.byId[e.to]).find((x) => x.kind === "corridor")?.id ?? R.at) : R.at;
+      R.est = { anchor: R.at, a: startNode, b: null, d: 0, steps: 0 };
+    }
+    const f = trueFacingNow();
+    R.est.steps += n;
+    if (f == null) return { ok: true, noHeading: true };
+    let px = n * stride.px, guard = 0;
+    const E = R.est;
+    while (px > 0 && guard++ < 20) {
+      if (!E.b) {
+        // At a node: take the hallway that best matches the way they face (within 60°), never a door/lift hop.
+        let best = null;
+        for (const e of m.adj[E.a] ?? []) {
+          const to = m.byId[e.to];
+          if (to.floor !== m.byId[E.a].floor || to.kind === "door") continue;
+          const diff = Math.abs(indoor.turnAngle(f, indoor.planBearing(m, E.a, e.to)));
+          if (diff <= 60 && (!best || diff < best.diff)) best = { to: e.to, diff };
+        }
+        if (!best) break; // turning or facing a wall: hold
+        E.b = best.to; E.d = 0;
+      }
+      const A = m.byId[E.a], Bn = m.byId[E.b], len = Math.hypot(A.x - Bn.x, A.y - Bn.y) || 1;
+      if (Math.abs(indoor.turnAngle(f, indoor.planBearing(m, E.a, E.b))) > 120) { [E.a, E.b] = [E.b, E.a]; E.d = len - E.d; } // walked back
+      E.d += px; px = 0;
+      if (E.d >= len) { px = E.d - len; E.a = E.b; E.b = null; E.d = 0; }
+    }
+    return { ok: true, steps: E.steps };
+  }
+  function estPosition(m, R) {
+    const E = R?.est;
+    if (!E || E.anchor !== R.at || !E.steps) return null;
+    const A = m.byId[E.a];
+    if (!E.b) return { x: A.x, y: A.y, steps: E.steps };
+    const B = m.byId[E.b], len = Math.hypot(A.x - B.x, A.y - B.y) || 1, t = Math.min(1, E.d / len);
+    return { x: Math.round(A.x + (B.x - A.x) * t), y: Math.round(A.y + (B.y - A.y) * t), steps: E.steps };
+  }
+  // A new place confirmed after walking from the last one: plan distance / steps = their stride.
+  function learnStride(m, R, fromId, toId) {
+    const steps = R.est?.anchor === fromId ? R.est.steps : 0;
+    if (steps < 8) return;
+    const d = indoor.dijkstra(m, fromId).dist[toId];
+    if (!Number.isFinite(d) || d < 60) return;
+    const px = Math.max(4, Math.min(14, d / steps));
+    stride.px = stride.n === 0 ? px : stride.px * 0.6 + px * 0.4;
+    stride.n += 1;
+    console.log(`[steps] ${steps} steps ${fromId}→${toId} (${Math.round(d)} px) → stride ${stride.px.toFixed(1)} px (n=${stride.n})`);
+  }
+
   function indoorOffset() { return phoneCalFresh() ? phoneCal.offset : cal.offset; }
   function outdoorOffset() { return phoneCalFresh() ? phoneCal.offset : outCal.n >= 3 ? outCal.offset : cal.n > 0 ? cal.offset : 0; }
   function outdoorFacing() {
@@ -905,7 +968,10 @@ export function createNav({ routesFile, askJSON, broadcast }) {
 
     // Every indoor trip (not only "where"): keep the trail of confirmed places for the live map.
     R.trail ??= [];
-    if (t.model && R.at && !R.ambiguous && R.trail.at(-1)?.id !== R.at) R.trail.push({ id: R.at, ts: R.seenTs ?? Date.now() });
+    if (t.model && R.at && !R.ambiguous && R.trail.at(-1)?.id !== R.at) {
+      if (R.trail.length) learnStride(t.model, R, R.trail.at(-1).id, R.at);
+      R.trail.push({ id: R.at, ts: R.seenTs ?? Date.now() });
+    }
 
     // Tracking only (no destination): report where we've placed them, keep a trail for the /where map.
     if (t.kind === "track") {
@@ -1486,7 +1552,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       image: m.image ? { url: "/api/indoor/plan.jpg", width: m.image.width, height: m.image.height } : null,
       nodes: m.nodes.map(({ id, x, y, floor, kind, label, room, near }) => ({ id, x, y, floor, kind, label: label ?? room ?? near ?? null })),
       edges: m.edges.map(([a, b]) => [a, b]),
-      trip: R && R.target.model === m ? { target: R.target.label, kind: R.target.kind, targetNodes: R.target.nodes, at: R.ambiguous ? null : R.at ?? null, path: R.ambiguous ? null : R.path ?? null, floor: R.floor ?? null, done: Boolean(R.done), trail: R.trail ?? [], trailPath: (R.trail ?? []).reduce((acc, p) => { if (!acc.length) return [p.id]; const seg = indoor.shortestPath(m, acc.at(-1), [p.id]); return seg ? acc.concat(seg.slice(1)) : acc.concat(p.id); }, []), seenAgoMs: R.seenTs ? Date.now() - R.seenTs : null, candidates: R.ambiguous ?? null } : null,
+      trip: R && R.target.model === m ? { target: R.target.label, kind: R.target.kind, targetNodes: R.target.nodes, at: R.ambiguous ? null : R.at ?? null, path: R.ambiguous ? null : R.path ?? null, floor: R.floor ?? null, done: Boolean(R.done), trail: R.trail ?? [], trailPath: (R.trail ?? []).reduce((acc, p) => { if (!acc.length) return [p.id]; const seg = indoor.shortestPath(m, acc.at(-1), [p.id]); return seg ? acc.concat(seg.slice(1)) : acc.concat(p.id); }, []), seenAgoMs: R.seenTs ? Date.now() - R.seenTs : null, candidates: R.ambiguous ?? null, est: estPosition(m, R), stridePx: Math.round(stride.px * 10) / 10, strideLearned: stride.n } : null,
       // Which way they face, in real-world degrees (raw glasses compass + plaque calibration), for the map's cone.
       heading: heading && Date.now() - heading.ts < 4000 ? { deg: Math.round(norm360(heading.deg + indoorOffset())), calibrated: cal.n > 0 || phoneCalFresh(), src: phoneCalFresh() ? "phone compass (glasses for head turns)" : cal.n > 0 ? "glasses compass, calibrated by a door sign" : "glasses compass, not calibrated yet" }
         : phoneFresh() ? { deg: Math.round(phone.deg), calibrated: true, src: "phone compass" } : null,
@@ -1502,7 +1568,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     calibration: () => ({ offset: Math.round(cal.offset), samples: cal.n, raw: heading ? Math.round(heading.deg) : null }),
     planInfo, planImageFile,
     noteFrame, liveInfo, liveFrame: () => live.frame, places: () => indoor.placesList(models),
-    setHeading, setPhoneHeading,
+    setHeading, setPhoneHeading, addSteps,
     get heading() { return heading; },
     loadRoutes, deleteRoute, listPlans, addPlan, planImage, deletePlan,
     start, stop, step, observe, location, state,

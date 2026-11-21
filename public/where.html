@@ -68,6 +68,10 @@
   .search button { flex: 0 0 auto; padding: 0 18px; }
   .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
   .quick button { flex: 0 0 auto; min-height: 36px; padding: 0 12px; font-weight: 500; font-size: 14px; border-radius: 999px; }
+  .results { display: grid; gap: 6px; margin: -4px 0 12px; }
+  .results button { text-align: left; padding: 10px 12px; min-height: 0; font-weight: 500; }
+  .results small { display: block; color: var(--muted); font-weight: 400; }
+  .ghost { fill: none; stroke: var(--accent); stroke-width: 3; stroke-dasharray: 4 5; opacity: .7; }
   .cand { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 4; stroke-dasharray: 6 5; }
   .target-ring { fill: none; stroke: var(--ok); stroke-width: 6; }
   .target-lbl { fill: var(--ok); font-size: 17px; font-weight: 700; paint-order: stroke; stroke: var(--card); stroke-width: 4px; }
@@ -86,6 +90,7 @@
     <button class="primary" type="submit">Go</button>
   </form>
   <div class="quick" id="quick"></div>
+  <div class="results" id="results"></div>
 
   <div class="navb" id="navb" hidden><b id="navi"></b><span id="navd"></span></div>
 
@@ -113,7 +118,7 @@
     <button class="primary" id="start">Start tracking</button>
     <button id="stop">Stop</button>
     <button id="reset">Reset compass</button>
-    <button id="pcomp">Use phone compass</button>
+    <button id="pcomp">Use phone sensors</button>
   </div>
 
   <div class="see">
@@ -152,6 +157,7 @@ function build(floor, wide) {
   el("polyline", { id: "trail", class: "trail", points: "" }, svg);
   el("g", { id: "targets" }, svg);
   el("g", { id: "cands" }, svg);
+  el("circle", { id: "ghost", r: 16, class: "ghost", style: "display:none" }, svg);
   const shown = new Set();
   for (const n of nodes) {
     if (n.kind === "corridor") continue;
@@ -177,15 +183,19 @@ function render(p) {
   const wide = Boolean(at && SIDE.test(at.id));
   if (built !== floor + (wide ? "w" : "")) { build(floor, wide); built = floor + (wide ? "w" : ""); }
 
-  const me = $("me");
-  if (at) {
+  // Moving dot: the step estimate from the phone when they've walked since the last recognised place,
+  // with a dashed ring left at that place.
+  const me = $("me"), pos = trip && trip.est ? trip.est : at;
+  if (pos) {
     me.style.display = "";
-    me.setAttribute("transform", `translate(${at.x} ${at.y})`);
-    me.style.transform = `translate(${at.x}px, ${at.y}px)`;
+    me.setAttribute("transform", `translate(${pos.x} ${pos.y})`);
+    me.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
   } else me.style.display = "none";
+  const gh = $("ghost");
+  if (at && trip.est) { gh.style.display = ""; gh.setAttribute("cx", at.x); gh.setAttribute("cy", at.y); } else gh.style.display = "none";
 
   const cone = $("cone");
-  if (at && p.heading) {
+  if (pos && p.heading) {
     const planAngle = p.heading.deg - (p.planUpBearing || 0); // degrees clockwise from "up" on the plan
     cone.style.display = "";
     cone.setAttribute("transform", `rotate(${planAngle})`);
@@ -219,6 +229,9 @@ function render(p) {
   if (!trip) {
     st.className = "status"; $("where").textContent = "Not tracking";
     $("meta").textContent = "Search a destination, or tap “Start tracking”, then look at a room number.";
+  } else if (trip.est && !at) {
+    st.className = "status ok"; $("where").textContent = `Walking · ${trip.est.steps} steps`;
+    $("meta").textContent = `from ${cands.length ? cands[0].label : "the last place seen"} · dot follows your steps until the next room number`;
   } else if (!at && cands.length) {
     st.className = "status stale"; $("where").textContent = `At ${cands[0].label} · one of ${cands.length} doors`;
     $("meta").textContent = "Look at the next room number or sign to pin down which door.";
@@ -233,6 +246,7 @@ function render(p) {
     const bits = [];
     bits.push(ago == null ? "placed earlier" : ago <= 2 ? "seen just now" : `last seen ${ago}s ago`);
     if (p.heading) bits.push(`facing ${p.heading.deg}°${p.heading.calibrated ? "" : " (compass not calibrated yet)"}`);
+    if (trip.est) bits.push(`${trip.est.steps} steps since${trip.strideLearned ? "" : " (stride not learned yet)"}`);
     if (trip.kind !== "track") bits.push(`to ${trip.target}`);
     $("meta").textContent = bits.join(" · ");
   }
@@ -328,14 +342,37 @@ setInterval(() => { $("frame").src = "/api/live/frame?ts=" + Date.now(); }, 1500
 
 const post = (url, body) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) }).then((r) => r.json());
 const go = (room) => post("/api/naviq/start", { room }).then((r) => { $("err").textContent = r && r.error ? r.error : ""; }).catch((e) => ($("err").textContent = e.message));
+const goTo = (d) => post("/api/naviq/start", { destination: { name: d.name, lat: d.lat, lon: d.lon } }).then((r) => { $("err").textContent = r && r.error ? r.error : ""; $("results").innerHTML = ""; }).catch((e) => ($("err").textContent = e.message));
 $("start").onclick = () => go("where");
-$("go").onsubmit = (e) => { e.preventDefault(); const q = $("q").value.trim(); if (q) { go(q); $("q").blur(); } };
+// Rooms and places inside City Tech start an indoor trip; anything else is an address or place outside.
+let indoorNames = [];
+const isIndoor = (q) => /^\s*[a-z]{1,2}\s*-?\s*\d{3,4}(\.\d+)?\s*$/i.test(q) || /^(where( am i)?|track|exit|way out|bath ?rooms?|rest ?rooms?|toilets?|men'?s|women'?s|elevators?|lifts?|escalators?|stairs?|theat(er|re)|gym)$/i.test(q.trim()) || indoorNames.includes(q.trim().toLowerCase());
+async function search(q) {
+  if (isIndoor(q)) { $("results").innerHTML = ""; return go(q); }
+  $("results").innerHTML = "<span class='sub'>Searching…</span>";
+  try {
+    const fix = lastGps ? `&lat=${lastGps.lat}&lon=${lastGps.lon}` : "";
+    const r = await (await fetch(`/api/geo/search?q=${encodeURIComponent(q)}${fix}`)).json();
+    const box = $("results"); box.innerHTML = "";
+    for (const d of (r.results || []).slice(0, 5)) {
+      const b = document.createElement("button"); b.type = "button";
+      b.innerHTML = `${d.name.replace(/</g, "&lt;")}<small>${(d.address || "").replace(/</g, "&lt;")}</small>`;
+      b.onclick = () => goTo(d); box.appendChild(b);
+    }
+    if (!box.children.length) box.innerHTML = "<span class='sub'>No places found</span>";
+  } catch (e) { $("results").innerHTML = ""; $("err").textContent = "Search: " + e.message; }
+}
+$("go").onsubmit = (e) => { e.preventDefault(); const q = $("q").value.trim(); if (q) { search(q); $("q").blur(); } };
+$("q").placeholder = "Room (A103), bathroom, exit, or an address…";
 for (const q of ["A103", "A105", "A104", "A106", "Bathroom", "Elevator", "Exit"]) {
   const b = document.createElement("button"); b.type = "button"; b.textContent = q; b.onclick = () => { $("q").value = q; go(q); }; $("quick").appendChild(b);
 }
 fetch("/api/indoor/places").then((r) => r.json()).then((d) => {
-  for (const p of d.places || []) { const o = document.createElement("option"); o.value = p.label; $("dests").appendChild(o); }
+  for (const p of d.places || []) { const o = document.createElement("option"); o.value = p.label; $("dests").appendChild(o); indoorNames.push(p.label.toLowerCase()); }
 }).catch(() => {});
+// Destination in the link: …/where?t=TOKEN&to=Jay%20St%20MetroTech
+const toParam = new URLSearchParams(location.search).get("to");
+if (toParam) { $("q").value = toParam; setTimeout(() => search(toParam), 300); }
 $("stop").onclick = () => post("/api/naviq/stop").catch(() => {});
 $("reset").onclick = () => post("/api/heading", { reset: true }).catch(() => {});
 
@@ -352,19 +389,42 @@ function onOrient(e) {
   if ((moved && now - pSentAt > 300) || now - pSentAt > 1500) {
     pLast = h; pSentAt = now;
     post("/api/heading/phone", { h }).catch(() => {});
-    $("pcomp").textContent = `Phone compass on · ${Math.round(h)}°`;
+    $("pcomp").textContent = `Sensors on · ${Math.round(h)}° · ${totalSteps} steps`;
   }
+}
+// Steps: peaks in the phone's acceleration (walking bounce), at most one every 300 ms.
+let avg = 9.8, above = false, lastStep = 0, pendingSteps = 0, totalSteps = 0;
+function onMotion(e) {
+  const a = e.accelerationIncludingGravity; if (!a || a.x == null) return;
+  const mag = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z), now = Date.now();
+  avg = avg * 0.95 + mag * 0.05;
+  if (!above && mag > avg + 1.4 && now - lastStep > 300) { above = true; lastStep = now; pendingSteps++; totalSteps++; }
+  else if (above && mag < avg + 0.4) above = false;
+}
+setInterval(() => { if (pendingSteps) { const n = pendingSteps; pendingSteps = 0; post("/api/steps", { n }).catch(() => {}); } }, 1000);
+// GPS for outdoor trips started from this page (same format as the main phone page).
+let lastGps = null, gpsWatch = null;
+function startGps() {
+  if (gpsWatch != null || !navigator.geolocation) return;
+  gpsWatch = navigator.geolocation.watchPosition((p) => {
+    const c = p.coords; lastGps = { lat: c.latitude, lon: c.longitude };
+    post("/api/naviq/loc", { lat: c.latitude, lon: c.longitude, acc: c.accuracy, speed: c.speed == null ? undefined : c.speed, sampleAt: p.timestamp }).catch(() => {});
+  }, (e) => { $("err").textContent = "GPS: " + e.message; }, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
 }
 $("pcomp").onclick = async () => {
   try {
     if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
       const r = await DeviceOrientationEvent.requestPermission();
-      if (r !== "granted") { $("err").textContent = "Compass permission denied: allow Motion & Orientation for this site."; return; }
+      if (r !== "granted") { $("err").textContent = "Permission denied: allow Motion & Orientation for this site."; return; }
     }
-    if (!pOn) { window.addEventListener("deviceorientationabsolute", onOrient); window.addEventListener("deviceorientation", onOrient); pOn = true; }
-    $("pcomp").textContent = "Phone compass on";
-    $("pcomp").className = "primary";
-  } catch (e) { $("err").textContent = "Compass: " + e.message; }
+    if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") await DeviceMotionEvent.requestPermission().catch(() => {});
+    if (!pOn) {
+      window.addEventListener("deviceorientationabsolute", onOrient); window.addEventListener("deviceorientation", onOrient);
+      window.addEventListener("devicemotion", onMotion); pOn = true;
+    }
+    startGps();
+    $("pcomp").textContent = "Phone sensors on"; $("pcomp").className = "primary";
+  } catch (e) { $("err").textContent = "Sensors: " + e.message; }
 };
 poll();
 </script>

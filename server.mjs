@@ -466,6 +466,11 @@ const server = http.createServer(async (req, res) => {
         const { h } = await readJson(req);
         return send(res, 200, nav.setPhoneHeading(Number(h)));
       }
+      // Steps counted by the phone (NAVIQ Live page): move the indoor dot along the plan between landmarks.
+      case "POST /api/steps": {
+        const { n } = await readJson(req);
+        return send(res, 200, nav.addSteps(Number(n)));
+      }
       case "GET /api/heading":
         return send(res, 200, { heading: nav.heading, calibration: nav.calibration() });
 
