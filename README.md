@@ -115,3 +115,7 @@ For buildings or floors not on the plan, it falls back to room-number logic: the
 Phone map: `GET /api/indoor/plan` returns the plan image, node pixels, current position and planned path.
 
 **Before demoing: `npm run check`** verifies keys, model access, Mapbox, the plan, the server, the tunnel and the glasses.
+
+## Laptop simulator (no glasses, no iPhone)
+
+`sim/demo.sh` runs the whole demo on a Linux laptop: Android emulators for the glasses and the phone, the webcam or a recorded walk as the glasses camera, a recorded track or the laptop's location as GPS, and optionally Claude Code as the model.  See [sim/README.md](sim/README.md).

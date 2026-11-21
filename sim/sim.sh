@@ -16,7 +16,7 @@
 #   VIDEO=clip.mp4 sim/sim.sh start   plays a video file (looped) instead of the webcam, and its sound track
 #   instead of the mic.  ffmpeg converts it once into sim/run/video/.
 # Phone: a Pixel running Chrome on http://localhost:8787/ (localhost counts as secure, so GPS works).
-#   GPS: "..." > Location, or  sim/walk.py --adb emulator-5556  to walk the active route.
+#   GPS: "..." > Location, or  sim/gps.py route  to walk the active route (see sim/gps.py -h).
 # The iOS Simulator only runs on macOS; Chrome on Android is the closest stand-in for Safari here.
 #
 # Both reach the server through adb reverse, so the server stays bound to 127.0.0.1.
@@ -129,7 +129,7 @@ start() {
   arrange
 
   say "glasses: $GS   phone: $PS   logs: $LOG"
-  say "walk the route:  sim/walk.py --adb $PS"
+  say "walk the route:  sim/gps.py route"
 }
 
 # Converts $VIDEO once into what Chrome's fake capture device reads: MJPEG frames and a 16-bit PCM wav.

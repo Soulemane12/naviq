@@ -1,9 +1,10 @@
 #!/bin/bash
-# Record a walk with the laptop webcam and mic, for VIDEO=... sim/sim.sh camera later.
+# Record a walk with the laptop webcam, mic and location, for  sim/demo.sh demo  later.
 #
 #   sim/record.sh            Start button → records (small preview window) → Stop button → saves the clip
 #
 # Clips go to sim/run/video-rec/walk-YYYYMMDD-HHMMSS.mp4; the path is printed on stdout.
+# Laptop location (GeoClue, Wi-Fi based, 20-100 m) goes to the same name + .gps.csv when available.
 # The webcam can only have one user, so this closes the simulator's camera window first.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -18,7 +19,15 @@ zenity --question --title="NAVIQ recorder" --width=320 \
   --ok-label="Start" --cancel-label="Cancel" || { say "cancelled"; exit 1; }
 
 clip="$OUT/walk-$(date +%Y%m%d-%H%M%S).mp4"
+track="${clip%.mp4}.gps.csv"
 log="$OUT/ffmpeg.log"
+gpspid=""
+if [ -x /usr/libexec/geoclue-2.0/demos/where-am-i ]; then
+  python3 -I sim/gps.py record "$track" >/dev/null 2>"$OUT/gps.log" &
+  gpspid=$!
+else
+  say "no GeoClue: recording video only"
+fi
 # One ffmpeg: the clip to disk, plus a low-res copy to a small ffplay preview window.
 ffmpeg -hide_banner -loglevel warning -y \
   -f v4l2 -input_format mjpeg -video_size 1280x720 -framerate 30 -i /dev/video0 \
@@ -36,11 +45,15 @@ say "recording $clip"
 zenity --info --title="NAVIQ recorder" --width=320 --text="Recording…\n\nPress Stop when you're done." --ok-label="Stop" || true
 
 kill -INT "$ffpid" 2>/dev/null || true   # ffmpeg finishes the mp4 cleanly on SIGINT
+[ -n "$gpspid" ] && kill -TERM "$gpspid" 2>/dev/null || true
 wait "$pipeline" 2>/dev/null || true
 pkill -f -- "-window_title NAVIQ recording" 2>/dev/null || true
 
 secs=$(ffprobe -loglevel error -show_entries format=duration -of csv=p=0 "$clip" 2>/dev/null || echo 0)
 say "saved ${secs%.*} s → $clip"
-say "use it:  VIDEO=$clip sim/sim.sh camera"
-zenity --info --title="NAVIQ recorder" --width=420 --text="Saved ${secs%.*} s:\n$clip\n\nUse it:\nVIDEO=$clip sim/sim.sh camera" || true
+fixes=$([ -f "$track" ] && echo $(( $(wc -l < "$track") - 1 )) || echo 0)
+say "location: $fixes fixes → $track"
+say "use it:  sim/demo.sh demo $clip"
+zenity --info --title="NAVIQ recorder" --width=420 \
+  --text="Saved ${secs%.*} s and $fixes location fixes:\n$clip\n\nReplay it:\nsim/demo.sh demo $clip" || true
 echo "$clip"
