@@ -31,7 +31,7 @@ SIM="$PWD/sim"
 export ANDROID_HOME="${ANDROID_HOME:-$SIM/android/sdk}"
 export ANDROID_USER_HOME="${ANDROID_USER_HOME:-$SIM/android/user}"
 export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
-SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+ANDROID_CLI="$ANDROID_HOME/cmdline-tools/latest/bin/android"   # replaces sdkmanager; --no-metrics: no usage data to Google
 AVDM="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
 EMU="$ANDROID_HOME/emulator/emulator"
 ADB="$ANDROID_HOME/platform-tools/adb"
@@ -60,9 +60,10 @@ EOF
 }
 
 setup() {
-  [ -x "$SDKM" ] || { say "missing $SDKM: install Android command-line tools there first"; exit 1; }
-  yes | "$SDKM" --licenses >/dev/null 2>&1 || true
-  "$SDKM" emulator platform-tools "platforms;android-28" "build-tools;36.0.0" "$GIMG" "$PIMG" >&2
+  [ -x "$ANDROID_CLI" ] || { say "missing $ANDROID_CLI: install Android command-line tools there first"; exit 1; }
+  # { yes || true; }: yes dies of SIGPIPE when the installer exits, which pipefail would treat as failure.
+  { yes || true; } | "$ANDROID_CLI" --no-metrics --sdk="$ANDROID_HOME" sdk install emulator platform-tools platforms/android-28 \
+    build-tools/36.0.0 "${GIMG//;//}" "${PIMG//;//}" >&2
 
   if ! "$AVDM" list avd -c | grep -qx "$GLASSES"; then
     echo no | "$AVDM" create avd -n "$GLASSES" -k "$GIMG" >&2
@@ -100,9 +101,9 @@ start() {
   [ -f glasses-app/WornHUD.apk ] || { say "no WornHUD.apk: sim/sim.sh setup"; exit 1; }
   "$ADB" start-server >/dev/null 2>&1   # once, before the parallel checks below race to start it
 
-  running "$GS" || "$EMU" -avd "$GLASSES" -port 5554 -camera-back "$WEBCAM" -allow-host-audio -no-boot-anim -no-snapshot-save \
+  running "$GS" || "$EMU" -avd "$GLASSES" -port 5554 -camera-back "$WEBCAM" -allow-host-audio -no-boot-anim -no-snapshot-save -no-metrics \
     >"$LOG/glasses.log" 2>&1 &
-  running "$PS" || "$EMU" -avd "$PHONE" -port 5556 -no-boot-anim -no-snapshot-save >"$LOG/phone.log" 2>&1 &
+  running "$PS" || "$EMU" -avd "$PHONE" -port 5556 -no-boot-anim -no-snapshot-save -no-metrics >"$LOG/phone.log" 2>&1 &
   wait_boot "$GS"
   wait_boot "$PS"
 
