@@ -451,6 +451,15 @@ const server = http.createServer(async (req, res) => {
 
       case "GET /api/live":
         return send(res, 200, nav.liveInfo());
+      case "POST /api/live/preview": {
+        const { image } = await readJson(req);
+        return send(res, 200, nav.setPreview(image));
+      }
+      case "GET /api/live/preview.jpg": {
+        const p = nav.preview();
+        if (!p.image) return send(res, 404, { error: "no preview" });
+        return send(res, 200, Buffer.from(p.image.split(",")[1], "base64"), "image/jpeg", { "cache-control": "no-store" });
+      }
       case "GET /api/live/frame":
         return sendFrame(res, nav.liveFrame());
       case "GET /api/indoor/places":

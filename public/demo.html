@@ -85,8 +85,11 @@ let frameTs = 0;
 async function cam() {
   try {
     const l = await (await fetch("/api/live", { cache: "no-store" })).json();
-    if (l.frameTs && l.frameTs !== frameTs) { frameTs = l.frameTs; $("cam").src = "/api/live/frame?ts=" + frameTs; }
-    $("age").textContent = l.frameTs ? `${Math.max(0, Math.round((Date.now() - l.frameTs) / 1000))} s ago` : "waiting for camera…";
+    // Live preview (~3 fps) when the glasses are streaming it; else the last frame the AI read.
+    const live = l.previewTs && Date.now() - l.previewTs < 3000;
+    const ts = live ? l.previewTs : l.frameTs;
+    if (ts && ts !== frameTs) { frameTs = ts; $("cam").src = (live ? "/api/live/preview.jpg?ts=" : "/api/live/frame?ts=") + ts; }
+    $("age").textContent = live ? "● LIVE" : l.frameTs ? `${Math.max(0, Math.round((Date.now() - l.frameTs) / 1000))} s ago` : "waiting for camera…";
     const r = l.read || {}, chips = $("chips");
     chips.innerHTML = "";
     const add = (t, c) => { const s = document.createElement("span"); s.className = "chip " + c; s.textContent = t; chips.appendChild(s); };
@@ -95,7 +98,7 @@ async function cam() {
     for (const x of r.signs || []) add(`sign “${x.text.replace(/\s+/g, " ")}”`, "");
     if (!chips.children.length) add(r.rooms ? "nothing recognised" : "—", "");
   } catch (e) { $("age").textContent = "can't reach NAVIQ"; }
-  setTimeout(cam, 700);
+  setTimeout(cam, 300);
 }
 cam();
 </script>

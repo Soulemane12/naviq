@@ -491,6 +491,9 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       : `${reason ? reason + ". " : ""}In ${exactDist(d)} meters, ${view.instruction.toLowerCase()} ${view.detail}.`;
     else if (near10 && !o.now10 && next.maneuver.type !== "arrive") speak = `${view.instruction.toLowerCase()} now.`;
     else if (near30 && !o.near) speak = `In ${exactDist(d)} meters, ${view.instruction.toLowerCase()}.`;
+    // Keep talking outdoors too: a progress update every 15 s when nothing else was said.
+    if (!speak && Date.now() - (o.spokenAt ?? 0) > 15000) speak = `${view.instruction.toLowerCase()}${view.detail ? " " + view.detail : ""}. ${exactDist(toGo)} meters to go.`;
+    if (speak) o.spokenAt = Date.now();
     o.stepIdx = k; o.near = near30; o.now10 = near10;
     o.evalAt = Date.now();
     const gps = `GPS ±${Math.round(fix.acc)} m`;
@@ -1234,8 +1237,12 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     // Speak only when the instruction changes (or every 15 s while it holds), not on every frame.
     const key = `${view.instruction}|${phase}`;
     let say = "";
-    if (key !== R.spokenKey || Date.now() - (R.spokenAt ?? 0) > 15000) {
-      say = spoken || `${view.instruction.toLowerCase()}. ${view.detail}.`;
+    // Keep talking while they walk: say it when it changes, then repeat it every 6 s (every 12 s while still
+    // looking for a first landmark). The HUD skips a line identical to its last one: alternate a trailing space.
+    const repeatMs = phase === "looking" ? 12000 : 6000;
+    if (key !== R.spokenKey || Date.now() - (R.spokenAt ?? 0) > repeatMs) {
+      R.sayFlip = !R.sayFlip;
+      say = (spoken || `${view.instruction.toLowerCase()}. ${view.detail}.`) + (R.sayFlip ? " " : "");
       R.spokenKey = key; R.spokenAt = Date.now();
     }
     entry.result = entry.result ?? (phase === "looking" ? "unverified" : "located");
@@ -1563,13 +1570,17 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     console.log(`[compass] calibrated from plaque: raw ${Math.round(rawFrame)}° should be ${Math.round(expected)}° → offset ${Math.round(cal.offset)}° (n=${cal.n})`);
   }
 
+  // Display-only live preview from the glasses (~3 fps, small), for the phone/laptop camera panel.
+  const preview = { image: null, ts: 0 };
+  function setPreview(image) { if (typeof image === "string" && image.startsWith("data:image/")) { preview.image = image; preview.ts = Date.now(); } return { ok: true }; }
+
   function noteFrame(image, source) {
     if (image) { live.frame = image; live.frameTs = Date.now(); live.source = source; }
   }
   function liveInfo() {
     const R = s?.room;
     return {
-      ts: live.ts, frameTs: live.frameTs, source: live.source, read: live.read,
+      ts: live.ts, frameTs: live.frameTs, source: live.source, read: live.read, previewTs: preview.ts,
       view: live.view ?? s?.lastCard?.nav ?? null,
       heading,
       memory: R ? { at: R.atLabel ?? null, increase: R.mem?.inc ?? {}, places: Object.fromEntries(Object.entries(R.mem ?? {}).filter(([k]) => k !== "inc")) } : null,
@@ -1602,7 +1613,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     resetCalibration: () => { Object.assign(cal, { offset: 0, n: 0, errs: [], lastDoor: null, lastTs: 0, pending: null }); return { ok: true }; },
     calibration: () => ({ offset: Math.round(cal.offset), samples: cal.n, raw: heading ? Math.round(heading.deg) : null }),
     planInfo, planImageFile,
-    noteFrame, liveInfo, liveFrame: () => live.frame, places: () => indoor.placesList(models),
+    noteFrame, liveInfo, setPreview, preview: () => preview, liveFrame: () => live.frame, places: () => indoor.placesList(models),
     setHeading, setPhoneHeading, addSteps,
     get heading() { return heading; },
     loadRoutes, deleteRoute, listPlans, addPlan, planImage, deletePlan,

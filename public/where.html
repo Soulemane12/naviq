@@ -365,7 +365,15 @@ async function poll() {
 }
 $("frame").onerror = () => { $("frame").style.visibility = "hidden"; };
 $("frame").onload = () => { $("frame").style.visibility = "visible"; };
-setInterval(() => { $("frame").src = "/api/live/frame?ts=" + Date.now(); }, 1500);
+// Camera panel: the glasses' live preview (~3 fps) when streaming, else the last analysed frame.
+let camTs = 0;
+setInterval(async () => {
+  try {
+    const l = await (await fetch("/api/live", { cache: "no-store" })).json();
+    const live = l.previewTs && Date.now() - l.previewTs < 3000, ts = live ? l.previewTs : l.frameTs;
+    if (ts && ts !== camTs) { camTs = ts; $("frame").src = (live ? "/api/live/preview.jpg?ts=" : "/api/live/frame?ts=") + ts; }
+  } catch (e) {}
+}, 400);
 
 const post = (url, body) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) }).then((r) => r.json());
 const go = (room) => post("/api/naviq/start", { room }).then((r) => { $("err").textContent = r && r.error ? r.error : ""; }).catch((e) => ($("err").textContent = e.message));

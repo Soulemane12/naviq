@@ -315,6 +315,19 @@
   // ---- camera: needs a secure context (localhost via `adb reverse`, or https) ----
   var stream = null, snapping = false, inflight = 0, captureId = 0;
   var MAX_INFLIGHT = 2; // two looks in flight at once on room trips
+  // Live preview for the phone / laptop demo screen: while the camera is open, send a small frame ~3x a second
+  // (display only, never analysed). The AI frames above stay as they are.
+  var previewBusy = 0, previewCanvas = document.createElement("canvas");
+  setInterval(function () {
+    var v = $("cam");
+    if (!onGlasses || !stream || previewBusy >= 2 || document.hidden || !v.videoWidth) return; // 2 in flight: tunnel round trips
+    var w = 480, h = Math.round(v.videoHeight * w / v.videoWidth);
+    previewCanvas.width = w; previewCanvas.height = h;
+    try { previewCanvas.getContext("2d").drawImage(v, 0, 0, w, h); } catch (e) { return; }
+    previewBusy++;
+    fetch("/api/live/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ image: previewCanvas.toDataURL("image/jpeg", 0.6) }) })
+      .catch(function () {}).then(function () { previewBusy--; });
+  }, 250);
   function dropCam() {
     if (stream) stream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
     stream = null;
