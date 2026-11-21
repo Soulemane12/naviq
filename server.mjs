@@ -589,11 +589,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  const ip = lanIp();
+// Localhost only: the tunnel and the glasses (adb reverse) both arrive on 127.0.0.1, and requests without
+// Cloudflare headers skip the token check, so the venue Wi-Fi must not reach this port.
+server.listen(PORT, "127.0.0.1", () => {
   console.log(`\nNAVIQ server (provider ${PROVIDER}, model ${MODEL})`);
-  console.log(`  phone (same Wi-Fi): http://${ip}:${PORT}/   (GPS needs the https tunnel link)`);
-  console.log(`  HUD:                http://${ip}:${PORT}/hud`);
+  console.log(`  phone (this laptop): http://localhost:${PORT}/   (phone GPS needs the https tunnel link)`);
+  console.log(`  HUD:                 http://localhost:${PORT}/hud`);
   console.log(`  tunnel token:       ${TOKEN}`);
   if (!hasKey) console.log("  ⚠ No API key: put OPENAI_API_KEY or ANTHROPIC_API_KEY in .env\n");
 });
