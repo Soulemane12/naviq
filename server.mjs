@@ -116,7 +116,7 @@ async function askJSON({ system, prompt, image, images, schema, name, effort, fa
         {
           role: "user",
           content: [
-            ...urls.map((url) => ({ type: "image_url", image_url: { url, detail: "high" } })),
+            ...urls.map((url) => ({ type: "image_url", image_url: { url, detail: scene ? (process.env.SCENE_DETAIL ?? "low") : "high" } })), // low: ~30% faster, same plaque reads (measured)
             { type: "text", text: prompt },
           ],
         },
@@ -408,19 +408,23 @@ const server = http.createServer(async (req, res) => {
       case "GET /api/tts": {
         const text = (url.searchParams.get("text") ?? "").trim().slice(0, 300);
         if (!openai || !text) return send(res, 404, { error: "tts needs OPENAI_API_KEY" });
-        let mp3 = ttsCache.get(text);
-        if (!mp3) {
-          const speech = await openai.audio.speech.create({
-            model: process.env.OPENAI_TTS_MODEL ?? "gpt-4o-mini-tts",
-            voice: process.env.OPENAI_TTS_VOICE ?? "alloy",
-            input: text,
-            response_format: "mp3",
-          });
-          mp3 = Buffer.from(await speech.arrayBuffer());
-          ttsCache.set(text, mp3);
-          if (ttsCache.size > 200) ttsCache.delete(ttsCache.keys().next().value);
-        }
-        return send(res, 200, mp3, "audio/mpeg");
+        const cached = ttsCache.get(text);
+        if (cached) return send(res, 200, cached, "audio/mpeg");
+        // Stream it: the glasses start speaking at the first audio chunk (~0.7 s) instead of the whole clip.
+        const speech = await openai.audio.speech.create({
+          model: process.env.OPENAI_TTS_MODEL ?? "gpt-4o-mini-tts",
+          voice: process.env.OPENAI_TTS_VOICE ?? "alloy",
+          input: text,
+          instructions: "Navigation voice: brisk, clear, upbeat. Speak quickly with no pauses.",
+          response_format: "mp3",
+        });
+        res.writeHead(200, { "content-type": "audio/mpeg", "cache-control": "no-store" });
+        const parts = [];
+        for await (const chunk of speech.body) { parts.push(Buffer.from(chunk)); res.write(chunk); }
+        res.end();
+        ttsCache.set(text, Buffer.concat(parts));
+        if (ttsCache.size > 200) ttsCache.delete(ttsCache.keys().next().value);
+        return;
       }
 
       // ----- trips -----

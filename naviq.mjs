@@ -295,7 +295,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       ...(extra.dist ?? {}),
       ...(extra.navExtra ?? {}),
       auto: Boolean(((s.plan && !s.plan.done) || (s.room && !s.room.done)) && !s.outdoor && !s.done), // glasses look on their own
-      autoMs: s.room ? 900 : 8000,
+      autoMs: s.room ? 450 : 8000, // indoor: look again quickly (3 reads in flight)
     });
     if (Number.isFinite(nav.aheadBearing)) {
       nav.aheadBearingTrue = Math.round(nav.aheadBearing) % 360;
@@ -1374,7 +1374,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     if (!image) throw Object.assign(new Error("no image"), { status: 400 });
     if (busy) return { busy: true };
     if (s.room && !s.room.done && !s.outdoor) {
-      if (inflight >= 2) return { busy: true };
+      if (inflight >= 3) return { busy: true };
       return indoorObserve(image, captureHeading);
     }
     if (s.plan && !s.outdoor) return planObserve(image);
