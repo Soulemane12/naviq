@@ -199,7 +199,12 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   console.log(`[indoor] plans: ${models.map((m) => `${m.name} (${m.nodes.length} nodes)`).join(", ") || "none"}`);
   // Latest camera look, for the phone's "what the glasses see" panel.
   const live = { frame: null, frameTs: 0, source: null, read: null, view: null, ts: 0 };
-  const headingNow = () => (heading && Date.now() - heading.ts < 3000 ? heading.deg : null);
+  // Compass calibration: when a door plaque is read close and centred, the plan says which way the wearer faces;
+  // the difference to the raw compass is a fixed offset we learn and apply (glasses magnetometers sit off by a
+  // constant amount). Smoothed raw heading too: the M6 compass jitters ±15°.
+  const cal = { offset: 0, n: 0 };
+  let hSmooth = null;
+  const headingNow = () => (heading && Date.now() - heading.ts < 3000 && hSmooth != null ? ((hSmooth + cal.offset) % 360 + 360) % 360 : null);
 
   async function loadRoutes() {
     try {
@@ -713,7 +718,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     R.applied = seq;
     const t = R.target;
     const ms = Date.now() - t0;
-    const h = hFrame ?? headingNow();
+    let h = hFrame ?? headingNow();
     const seen = v.rooms.map((r) => ({ ...indoor.parseRoom(r.label), position: r.position })).filter((r) => r.label);
     const seenOut = v.rooms.map((r) => ({ label: r.label, position: r.position }));
     live.read = v; live.ts = Date.now();
@@ -723,6 +728,17 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       confidence: seen.length || v.places.length ? "high" : "low",
     };
     const finish = (card) => { s.history.push(entry); live.view = card.nav; return { read: v, ms, card, state: state() }; };
+
+    // Calibrate the compass from a close, centred room plaque we have on the plan.
+    if (t.model) {
+      const plaque = v.rooms.find((r) => r.close && r.position === "center");
+      const pr = plaque && indoor.parseRoom(plaque.label);
+      const door = pr && t.model.nodes.find((n) => n.kind === "door" && n.room === pr.label);
+      const corr = door && t.model.adj[door.id]?.map((e) => t.model.byId[e.to]).find((n) => n.kind === "corridor");
+      if (door && corr) { calibrateFrom(indoor.planBearing(t.model, corr.id, door.id)); }
+    }
+    const hCal = headingNow();
+    if (hCal != null) h = hCal; // use the freshly calibrated heading for this frame
 
     // Remember where places were seen as compass bearings, to keep pointing after they leave the frame.
     if (h != null) for (const p of v.places) R.mem[p.kind] = { bearing: norm360(h + POS_OFFSET[p.position]), ts: Date.now(), cue: p.cue };
@@ -1188,8 +1204,19 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   }
 
   function setHeading(h) {
-    if (Number.isFinite(h)) heading = { deg: ((h % 360) + 360) % 360, ts: Date.now() };
-    return { ok: true };
+    if (!Number.isFinite(h)) return { ok: false };
+    const deg = ((h % 360) + 360) % 360;
+    heading = { deg, ts: Date.now() };
+    if (hSmooth == null) hSmooth = deg;
+    else hSmooth = ((hSmooth + 0.35 * (((deg - hSmooth + 540) % 360) - 180)) % 360 + 360) % 360;
+    return { ok: true, calibrated: cal.n > 0, offset: Math.round(cal.offset) };
+  }
+  function calibrateFrom(expected) {
+    if (hSmooth == null || !heading || Date.now() - heading.ts > 3000) return;
+    const err = ((expected - hSmooth + 540) % 360) - 180; // what we should add to the raw compass
+    cal.offset = cal.n === 0 ? err : cal.offset + 0.4 * (((err - cal.offset + 540) % 360) - 180);
+    cal.n += 1;
+    console.log(`[compass] calibrated from plaque: raw ${Math.round(hSmooth)}° should be ${Math.round(expected)}° → offset ${Math.round(cal.offset)}° (n=${cal.n})`);
   }
 
   function noteFrame(image, source) {
@@ -1221,6 +1248,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   const planImageFile = () => (models[0]?.image ? path.join(path.dirname(routesFile), "citytech", models[0].image.file) : null);
 
   return {
+    calibration: () => ({ offset: Math.round(cal.offset), samples: cal.n, raw: hSmooth == null ? null : Math.round(hSmooth) }),
     planInfo, planImageFile,
     noteFrame, liveInfo, liveFrame: () => live.frame, places: () => indoor.placesList(models),
     setHeading,

@@ -461,7 +461,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, nav.setHeading(Number(h)));
       }
       case "GET /api/heading":
-        return send(res, 200, { heading: nav.heading });
+        return send(res, 200, { heading: nav.heading, calibration: nav.calibration() });
 
       case "POST /api/naviq/observe": {
         const { image, text } = await readJson(req);
