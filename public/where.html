@@ -113,6 +113,7 @@
     <button class="primary" id="start">Start tracking</button>
     <button id="stop">Stop</button>
     <button id="reset">Reset compass</button>
+    <button id="pcomp">Use phone compass</button>
   </div>
 
   <div class="see">
@@ -314,7 +315,7 @@ async function poll() {
       const p = await r.json();
       render(p);
       const n = card.nav || {};
-      const src = p.heading ? (p.heading.calibrated ? "glasses compass, calibrated by a door sign" : "glasses compass, not calibrated yet: look at a room number") : "";
+      const src = p.heading ? "from " + (p.heading.src || (p.heading.calibrated ? "glasses compass, calibrated" : "glasses compass, not calibrated yet")) : "";
       dial(p.heading ? p.heading.deg : null, src, p.trip && p.trip.kind !== "track" && Number.isFinite(n.aheadBearingTrue) ? n.aheadBearingTrue : null);
     }
     $("err").textContent = "";
@@ -337,6 +338,34 @@ fetch("/api/indoor/places").then((r) => r.json()).then((d) => {
 }).catch(() => {});
 $("stop").onclick = () => post("/api/naviq/stop").catch(() => {});
 $("reset").onclick = () => post("/api/heading", { reset: true }).catch(() => {});
+
+// ---------- phone compass → server (iPhone: webkitCompassHeading is magnetic; NYC declination ≈ 12.8° W) ----------
+const DECLINATION = -12.8;
+let pLast = null, pSentAt = 0, pOn = false;
+function onOrient(e) {
+  let mag = null;
+  if (typeof e.webkitCompassHeading === "number" && e.webkitCompassHeading >= 0) mag = e.webkitCompassHeading;
+  else if (e.absolute && typeof e.alpha === "number") mag = (360 - e.alpha) % 360; // Android absolute
+  if (mag == null) return;
+  const h = (mag + DECLINATION + 360) % 360, now = Date.now();
+  const moved = pLast == null || Math.abs(((h - pLast + 540) % 360) - 180) > 2;
+  if ((moved && now - pSentAt > 300) || now - pSentAt > 1500) {
+    pLast = h; pSentAt = now;
+    post("/api/heading/phone", { h }).catch(() => {});
+    $("pcomp").textContent = `Phone compass on · ${Math.round(h)}°`;
+  }
+}
+$("pcomp").onclick = async () => {
+  try {
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      const r = await DeviceOrientationEvent.requestPermission();
+      if (r !== "granted") { $("err").textContent = "Compass permission denied: allow Motion & Orientation for this site."; return; }
+    }
+    if (!pOn) { window.addEventListener("deviceorientationabsolute", onOrient); window.addEventListener("deviceorientation", onOrient); pOn = true; }
+    $("pcomp").textContent = "Phone compass on";
+    $("pcomp").className = "primary";
+  } catch (e) { $("err").textContent = "Compass: " + e.message; }
+};
 poll();
 </script>
 </body>

@@ -461,6 +461,11 @@ const server = http.createServer(async (req, res) => {
         if (reset) return send(res, 200, nav.resetCalibration());
         return send(res, 200, nav.setHeading(h));
       }
+      // Phone compass (true heading from iPhone's webkitCompassHeading, declination-corrected on the phone).
+      case "POST /api/heading/phone": {
+        const { h } = await readJson(req);
+        return send(res, 200, nav.setPhoneHeading(Number(h)));
+      }
       case "GET /api/heading":
         return send(res, 200, { heading: nav.heading, calibration: nav.calibration() });
 

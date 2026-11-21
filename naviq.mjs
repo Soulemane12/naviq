@@ -298,7 +298,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     });
     if (Number.isFinite(nav.aheadBearing)) {
       nav.aheadBearingTrue = Math.round(nav.aheadBearing) % 360;
-      nav.aheadBearing = Math.round(norm360(nav.aheadBearing - (s.outdoor ? outdoorOffset() : cal.offset))) % 360;
+      nav.aheadBearing = Math.round(norm360(nav.aheadBearing - (s.outdoor ? outdoorOffset() : indoorOffset()))) % 360;
     }
     if (s.plan || s.room) { nav.step = 0; nav.total = 0; }
     if (s.room && !nav.target) nav.target = s.room.target.label;
@@ -617,9 +617,31 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   }
   // Which way they face outdoors, and how we know: walking → GPS course; standing → compass (calibrated by
   // walking if we have it, else by the last door plaque, else raw).
-  function outdoorOffset() { return outCal.n >= 3 ? outCal.offset : cal.n > 0 ? cal.offset : 0; }
+  // Phone compass (iPhone, far steadier than the M6 magnetometer): the true direction. Blended with the glasses
+  // compass as a slowly-updated offset, so the glasses still follow quick head turns but stay anchored to the phone.
+  let phone = null; // { deg, ts } true heading from the phone
+  const phoneCal = { offset: 0, ts: 0 };
+  const phoneFresh = () => phone && Date.now() - phone.ts < 4000;
+  const phoneCalFresh = () => phoneFresh() && Date.now() - phoneCal.ts < 4000;
+  function setPhoneHeading(h) {
+    if (!Number.isFinite(h)) return { ok: false };
+    const now = Date.now();
+    phone = { deg: ((h % 360) + 360) % 360, ts: now };
+    if (heading && now - heading.ts < 1500) {
+      const err = ((phone.deg - heading.deg + 540) % 360) - 180;
+      phoneCal.offset = now - phoneCal.ts < 4000 ? phoneCal.offset + 0.1 * (((err - phoneCal.offset + 540) % 360) - 180) : err;
+      phoneCal.ts = now;
+    }
+    const o = s && !s.done ? s.outdoor : null;
+    if (o && o.steps?.length && !o.routing && lastFix && now - (o.evalAt ?? 0) > 1200) updateOutdoor(lastFix);
+    return { ok: true, offset: Math.round(phoneCal.offset) };
+  }
+  function indoorOffset() { return phoneCalFresh() ? phoneCal.offset : cal.offset; }
+  function outdoorOffset() { return phoneCalFresh() ? phoneCal.offset : outCal.n >= 3 ? outCal.offset : cal.n > 0 ? cal.offset : 0; }
   function outdoorFacing() {
     if (course && Date.now() - course.ts < 4000) return { deg: Math.round(course.deg), src: "walking direction (GPS)", sure: true };
+    if (phoneFresh() && !(heading && Date.now() - heading.ts < 4000)) return { deg: Math.round(phone.deg), src: "phone compass", sure: true };
+    if (phoneCalFresh() && heading) return { deg: Math.round(((heading.deg + phoneCal.offset) % 360 + 360) % 360), src: "phone compass (glasses for head turns)", sure: true };
     if (!heading || Date.now() - heading.ts > 4000) return null;
     const src = outCal.n >= 3 ? "compass, calibrated by walking" : cal.n > 0 ? "compass, calibrated by a door sign" : "compass, not calibrated";
     return { deg: Math.round(((heading.deg + outdoorOffset()) % 360 + 360) % 360), src, sure: outCal.n >= 3 };
@@ -870,12 +892,12 @@ export function createNav({ routesFile, askJSON, broadcast }) {
         break;
       }
     }
-    const h = visionFacing ?? (rawFrame == null ? null : norm360(rawFrame + cal.offset));
+    const h = visionFacing ?? (rawFrame != null ? norm360(rawFrame + indoorOffset()) : phoneFresh() ? phone.deg : null);
     const latestRaw = rawHeadingNow();
     // Head turned since the frame was taken? Carry the vision heading forward by the compass's relative change.
     const facing = visionFacing != null
       ? (latestRaw != null && rawFrame != null ? norm360(visionFacing + indoor.turnAngle(rawFrame, latestRaw)) : visionFacing)
-      : latestRaw == null ? h : norm360(latestRaw + cal.offset);
+      : latestRaw == null ? (phoneFresh() ? phone.deg : h) : norm360(latestRaw + indoorOffset());
     const seenBearing = (pos) => h != null ? norm360(h + POS_OFFSET[pos]) : null;
 
     // Remember where places were seen as compass bearings, to keep pointing after they leave the frame.
@@ -1466,7 +1488,8 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       edges: m.edges.map(([a, b]) => [a, b]),
       trip: R && R.target.model === m ? { target: R.target.label, kind: R.target.kind, targetNodes: R.target.nodes, at: R.ambiguous ? null : R.at ?? null, path: R.ambiguous ? null : R.path ?? null, floor: R.floor ?? null, done: Boolean(R.done), trail: R.trail ?? [], trailPath: (R.trail ?? []).reduce((acc, p) => { if (!acc.length) return [p.id]; const seg = indoor.shortestPath(m, acc.at(-1), [p.id]); return seg ? acc.concat(seg.slice(1)) : acc.concat(p.id); }, []), seenAgoMs: R.seenTs ? Date.now() - R.seenTs : null, candidates: R.ambiguous ?? null } : null,
       // Which way they face, in real-world degrees (raw glasses compass + plaque calibration), for the map's cone.
-      heading: heading && Date.now() - heading.ts < 4000 ? { deg: Math.round(norm360(heading.deg + cal.offset)), calibrated: cal.n > 0 } : null,
+      heading: heading && Date.now() - heading.ts < 4000 ? { deg: Math.round(norm360(heading.deg + indoorOffset())), calibrated: cal.n > 0 || phoneCalFresh(), src: phoneCalFresh() ? "phone compass (glasses for head turns)" : cal.n > 0 ? "glasses compass, calibrated by a door sign" : "glasses compass, not calibrated yet" }
+        : phoneFresh() ? { deg: Math.round(phone.deg), calibrated: true, src: "phone compass" } : null,
       read: live.read && Date.now() - live.ts < 15000 ? { rooms: live.read.rooms, places: live.read.places, signs: live.read.signs ?? [], ageMs: Date.now() - live.ts } : null,
       // What the glasses are telling them right now (for the map's instruction banner).
       nav: s && !s.done && s.room && R?.target.model === m && s.roomView ? { instruction: s.roomView.instruction, detail: s.roomView.detail, arrow: s.roomView.arrow } : null,
@@ -1479,7 +1502,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     calibration: () => ({ offset: Math.round(cal.offset), samples: cal.n, raw: heading ? Math.round(heading.deg) : null }),
     planInfo, planImageFile,
     noteFrame, liveInfo, liveFrame: () => live.frame, places: () => indoor.placesList(models),
-    setHeading,
+    setHeading, setPhoneHeading,
     get heading() { return heading; },
     loadRoutes, deleteRoute, listPlans, addPlan, planImage, deletePlan,
     start, stop, step, observe, location, state,
