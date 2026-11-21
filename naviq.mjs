@@ -667,9 +667,26 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       const startNode = m.byId[R.at].kind === "door" ? (m.adj[R.at].map((e) => m.byId[e.to]).find((x) => x.kind === "corridor")?.id ?? R.at) : R.at;
       R.est = { anchor: R.at, a: startNode, b: null, d: 0, steps: 0 };
     }
-    const f = trueFacingNow();
     R.est.steps += n;
     if (Math.floor(R.est.steps / 10) !== Math.floor((R.est.steps - n) / 10)) console.log(`[steps] ${R.est.steps} steps since ${R.est.anchor}`);
+    // On a trip they follow the directions: steps advance along the planned route (the indoor compass can be
+    // 150° off; following it walked the dot the wrong way). "Where am I" mode has no route: use facing.
+    const p = R.path;
+    if (R.target.kind !== "track" && Array.isArray(p) && p.length > 1 && p[0] === R.at) {
+      const E = R.est;
+      E.route ??= { idx: m.byId[p[0]].kind === "door" ? 1 : 0, d: 0 };
+      let left = n * stride.px;
+      while (left > 0 && E.route.idx < p.length - 1) {
+        const A = m.byId[p[E.route.idx]], B = m.byId[p[E.route.idx + 1]];
+        if (A.floor !== B.floor) break; // lift/escalator: stop at it
+        const segLeft = Math.hypot(A.x - B.x, A.y - B.y) - E.route.d;
+        if (left < segLeft) { E.route.d += left; left = 0; } else { left -= segLeft; E.route.idx += 1; E.route.d = 0; }
+      }
+      E.a = p[E.route.idx]; E.b = p[E.route.idx + 1] ?? null; E.d = E.route.d;
+      if (E.b && m.byId[E.a].floor !== m.byId[E.b].floor) E.b = null;
+      return { ok: true, steps: E.steps, along: "route" };
+    }
+    const f = trueFacingNow();
     if (f == null) return { ok: true, noHeading: true };
     let px = n * stride.px, guard = 0;
     const E = R.est;
