@@ -178,8 +178,14 @@ const fromFeature = (f, kind) => ({
   lat: f.properties.coordinates.latitude,
   lon: f.properties.coordinates.longitude,
   kind,
+  type: f.properties.feature_type ?? null,
 });
+// Vague areas (a ZIP code, a neighbourhood, a whole city) rank below real addresses, corners and places.
+const VAGUE = new Set(["postcode", "neighborhood", "locality", "place", "district", "region", "country"]);
 async function geoSearch(q, near) {
+  // Typed or pasted intersections like "Jay Street &, Tillary St, Brooklyn" confuse the geocoder (it answered
+  // with just the ZIP code): tidy the punctuation.
+  q = q.replace(/\s*&\s*,\s*/g, " & ").replace(/,\s*,+/g, ",").replace(/\s{2,}/g, " ").trim();
   const tok = process.env.MAPBOX_TOKEN;
   if (tok) {
     const prox = near ? { proximity: `${near.lon},${near.lat}` } : {};
@@ -197,6 +203,7 @@ async function geoSearch(q, near) {
       if (merged.some((m) => Math.hypot((m.lat - r.lat) * 111000, (m.lon - r.lon) * 85000) < 40 && m.name === r.name)) continue;
       merged.push(r);
     }
+    merged.sort((a, b) => Number(VAGUE.has(a.type)) - Number(VAGUE.has(b.type))); // stable: keeps relevance order
     if (merged.length) return merged.slice(0, 8);
   }
   return osmSearch(q, near);
