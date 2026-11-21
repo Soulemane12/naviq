@@ -140,7 +140,7 @@ function render(p) {
   } else cone.style.display = "none";
 
   const pts = (ids) => (ids || []).map((id) => byId[id]).filter((n) => n && n.floor === floor).map((n) => `${n.x},${n.y}`).join(" ");
-  $("trail").setAttribute("points", pts(trip ? trip.trail.map((t) => t.id) : []));
+  $("trail").setAttribute("points", pts(trip ? trip.trailPath || trip.trail.map((t) => t.id) : []));
   $("route").setAttribute("points", trip && trip.kind !== "track" ? pts(trip.path) : "");
 
   const st = $("status");
