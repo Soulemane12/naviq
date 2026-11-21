@@ -202,7 +202,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   // Compass calibration: when a door plaque is read close and centred, the plan says which way the wearer faces;
   // the difference to the raw compass is a fixed offset we learn and apply (glasses magnetometers sit off by a
   // constant amount). Smoothed raw heading too: the M6 compass jitters ±15°.
-  const cal = { offset: 0, n: 0 };
+  const cal = { offset: 0, n: 0, errs: [], lastDoor: null, lastTs: 0 };
   let hSmooth = null;
   const headingNow = () => (heading && Date.now() - heading.ts < 3000 && hSmooth != null ? ((hSmooth + cal.offset) % 360 + 360) % 360 : null);
 
@@ -735,7 +735,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       const pr = plaque && indoor.parseRoom(plaque.label);
       const door = pr && t.model.nodes.find((n) => n.kind === "door" && n.room === pr.label);
       const corr = door && t.model.adj[door.id]?.map((e) => t.model.byId[e.to]).find((n) => n.kind === "corridor");
-      if (door && corr) { calibrateFrom(indoor.planBearing(t.model, corr.id, door.id)); }
+      if (door && corr) { calibrateFrom(indoor.planBearing(t.model, corr.id, door.id), door.id); }
     }
     const hCal = headingNow();
     if (hCal != null) h = hCal; // use the freshly calibrated heading for this frame
@@ -783,7 +783,21 @@ export function createNav({ routesFile, askJSON, broadcast }) {
 
     // 2) Routed on the real building plan (City Tech Academic Complex).
     if (!view && t.model) {
-      const a = indoor.anchorFromRead(t.model, v, R.at, R.floor ?? null);
+      let a = indoor.anchorFromRead(t.model, v, R.at, R.floor ?? null);
+      // A landmark alone (exit sign, elevators, turnstiles) isn't unique: there are more of them in the building
+      // than on the plan. Room plaques place you; a landmark only moves you if nothing has placed you yet, if the
+      // route expects it next, if it's right next to where you are, or if it stays in view close for 3 frames.
+      if (a && a.via === "place" && R.at && a.id !== R.at) {
+        const key = a.id;
+        R.placeStreak = a.close && R.placeStreakId === key ? (R.placeStreak ?? 0) + 1 : a.close ? 1 : 0;
+        R.placeStreakId = key;
+        const near = (indoor.dijkstra(t.model, R.at).dist[a.id] ?? Infinity) <= 160;
+        const expected = Array.isArray(R.path) && R.path.includes(a.id);
+        if (!(near || expected || R.placeStreak >= 3)) {
+          console.log(`[indoor] ignoring lone ${a.kind} sighting (would move ${R.at} → ${a.id})`);
+          a = null;
+        }
+      } else if (a) { R.placeStreak = 0; R.placeStreakId = null; }
       if (a && (a.close || !R.at || Date.now() - (R.atTs ?? 0) > 20000)) {
         if (a.id !== R.at) R.followed = new Set(); // new place: start counting followed legs again
         R.at = a.id; R.atTs = Date.now(); R.atLabel = a.label; R.ambiguous = a.ambiguous ?? null;
@@ -915,7 +929,9 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     return finish(emit(kind, status, {
       speak: say,
       phoneDetail: `${status}. ${view.instruction}: ${view.detail}.`,
-      navExtra: { phase, target: t.label, seen: seenOut, ...(bearingOut != null ? { aheadBearing: Math.round(bearingOut) } : {}) },
+      // The glasses rotate their arrow with their own raw compass, so send the walk bearing in that frame
+      // (true bearing minus our calibration offset); aheadBearingTrue is the real-world bearing for the map/log.
+      navExtra: { phase, target: t.label, seen: seenOut, ...(bearingOut != null ? { aheadBearing: Math.round(norm360(bearingOut - cal.offset)), aheadBearingTrue: Math.round(bearingOut) } : {}) },
     }));
   }
 
@@ -1211,10 +1227,17 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     else hSmooth = ((hSmooth + 0.35 * (((deg - hSmooth + 540) % 360) - 180)) % 360 + 360) % 360;
     return { ok: true, calibrated: cal.n > 0, offset: Math.round(cal.offset) };
   }
-  function calibrateFrom(expected) {
+  function calibrateFrom(expected, doorId) {
     if (hSmooth == null || !heading || Date.now() - heading.ts > 3000) return;
+    // One sample per door sighting (not one per frame while staring at it), median of the last 7 sightings:
+    // a plaque read at an angle shouldn't drag the whole compass.
+    if (cal.lastDoor === doorId && Date.now() - cal.lastTs < 20000) return;
+    cal.lastDoor = doorId; cal.lastTs = Date.now();
     const err = ((expected - hSmooth + 540) % 360) - 180; // what we should add to the raw compass
-    cal.offset = cal.n === 0 ? err : cal.offset + 0.4 * (((err - cal.offset + 540) % 360) - 180);
+    cal.errs = [...(cal.errs ?? []), err].slice(-7);
+    const ref = cal.errs[0];
+    const rel = cal.errs.map((e) => ((e - ref + 540) % 360) - 180).sort((x, y) => x - y);
+    cal.offset = ((ref + rel[Math.floor(rel.length / 2)] + 540) % 360) - 180;
     cal.n += 1;
     console.log(`[compass] calibrated from plaque: raw ${Math.round(hSmooth)}° should be ${Math.round(expected)}° → offset ${Math.round(cal.offset)}° (n=${cal.n})`);
   }
@@ -1248,6 +1271,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   const planImageFile = () => (models[0]?.image ? path.join(path.dirname(routesFile), "citytech", models[0].image.file) : null);
 
   return {
+    resetCalibration: () => { Object.assign(cal, { offset: 0, n: 0, errs: [], lastDoor: null, lastTs: 0 }); return { ok: true }; },
     calibration: () => ({ offset: Math.round(cal.offset), samples: cal.n, raw: hSmooth == null ? null : Math.round(hSmooth) }),
     planInfo, planImageFile,
     noteFrame, liveInfo, liveFrame: () => live.frame, places: () => indoor.placesList(models),

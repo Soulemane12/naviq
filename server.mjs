@@ -278,7 +278,7 @@ function logStep(src, image, out) {
   const v = out.verdict, g = out.guide, r = out.read, n = out.card?.nav;
   const what = v ? `${v.seen_id} (${v.confidence}) "${v.sign_text}"`
     : g ? `${g.located ? g.location : "not located"} (${g.confidence}) → ${g.instruction} ${g.detail}${g.arrived ? " ARRIVED" : ""}`
-    : r ? `rooms [${r.rooms.map((x) => x.label + "@" + x.position).join(" ")}] places [${(r.places ?? []).map((x) => x.kind + "@" + x.position + (x.close ? "!" : "")).join(" ")}] up:${r.numbers_increase} → ${n?.instruction ?? ""} · ${n?.detail ?? ""}${n?.aheadBearing != null ? ` [${n.aheadBearing}°]` : ""}` : "";
+    : r ? `rooms [${r.rooms.map((x) => x.label + "@" + x.position).join(" ")}] places [${(r.places ?? []).map((x) => x.kind + "@" + x.position + (x.close ? "!" : "")).join(" ")}] up:${r.numbers_increase} → ${n?.instruction ?? ""} · ${n?.detail ?? ""}${n?.aheadBearing != null ? ` [${n.aheadBearingTrue ?? n.aheadBearing}°]` : ""}` : "";
   console.log(`[naviq] ${src} image=${kb(image)}KB ${out.ms}ms → ${what}`);
 }
 
@@ -457,7 +457,8 @@ const server = http.createServer(async (req, res) => {
 
       // Glasses compass: which way the wearer faces (the HUD rotates its arrow locally; this is for the log/phone).
       case "POST /api/heading": {
-        const { h } = await readJson(req);
+        const { h, reset } = await readJson(req);
+        if (reset) return send(res, 200, nav.resetCalibration());
         return send(res, 200, nav.setHeading(Number(h)));
       }
       case "GET /api/heading":
