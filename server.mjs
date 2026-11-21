@@ -473,6 +473,9 @@ const server = http.createServer(async (req, res) => {
         const { n } = await readJson(req);
         return send(res, 200, nav.addSteps(Number(n)));
       }
+      // Wearer confirms "I'm facing the right way" → calibrate the active compass to the route direction.
+      case "POST /api/heading/align":
+        return send(res, 200, nav.alignHeading());
       case "GET /api/heading":
         return send(res, 200, { heading: nav.heading, calibration: nav.calibration() });
 

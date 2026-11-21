@@ -504,6 +504,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     const aheadPt = { lat: o.line[j].lat + (o.line[j + 1].lat - o.line[j].lat) * tt, lon: o.line[j].lon + (o.line[j + 1].lon - o.line[j].lon) * tt };
     const here = { lat: o.line[seg].lat + (o.line[seg + 1].lat - o.line[seg].lat) * segT, lon: o.line[seg].lon + (o.line[seg + 1].lon - o.line[seg].lon) * segT };
     const routeBearing = bearing(here, aheadPt);
+    o.routeBearing = routeBearing; // for "I'm facing the right way" calibration
 
     // Facing the wrong way? (GPS course while walking, compass while standing.) Hysteresis: warn past 60°/130°,
     // clear once within 40° of the route.
@@ -620,13 +621,14 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   // Phone compass (iPhone, far steadier than the M6 magnetometer): the true direction. Blended with the glasses
   // compass as a slowly-updated offset, so the glasses still follow quick head turns but stay anchored to the phone.
   let phone = null; // { deg, ts } true heading from the phone
+  let phoneTrim = 0; // user correction from "I'm facing the right way"
   const phoneCal = { offset: 0, ts: 0 };
   const phoneFresh = () => phone && Date.now() - phone.ts < 4000;
   const phoneCalFresh = () => phoneFresh() && Date.now() - phoneCal.ts < 4000;
   function setPhoneHeading(h) {
     if (!Number.isFinite(h)) return { ok: false };
     const now = Date.now();
-    phone = { deg: ((h % 360) + 360) % 360, ts: now };
+    phone = { deg: (((h + phoneTrim) % 360) + 360) % 360, ts: now };
     if (heading && now - heading.ts < 1500) {
       const err = ((phone.deg - heading.deg + 540) % 360) - 180;
       phoneCal.offset = now - phoneCal.ts < 4000 ? phoneCal.offset + 0.1 * (((err - phoneCal.offset + 540) % 360) - 180) : err;
@@ -697,6 +699,38 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     stride.px = stride.n === 0 ? px : stride.px * 0.6 + px * 0.4;
     stride.n += 1;
     console.log(`[steps] ${steps} steps ${fromId}→${toId} (${Math.round(d)} px) → stride ${stride.px.toFixed(1)} px (n=${stride.n})`);
+  }
+
+  // "I'm facing the right way": the wearer confirms they face along the route right now. That's ground truth:
+  // correct whichever compass is in charge so this direction reads as straight.
+  function alignHeading() {
+    if (!s || s.done) return { ok: false, error: "Start a trip first" };
+    let want = null;
+    if (s.outdoor) want = Number.isFinite(s.outdoor.routeBearing) ? s.outdoor.routeBearing : null;
+    else if (s.room?.target.model && s.room.at) {
+      const g = indoor.guide(s.room.target.model, s.room.at, s.room.target.nodes, null);
+      want = g && !g.arrived && Number.isFinite(g.bearing) ? g.bearing : null;
+    }
+    if (want == null) return { ok: false, error: "No route direction yet: get placed first (look at a room number) or wait for GPS" };
+    const now = Date.now();
+    const glassesFresh = heading && now - heading.ts < 4000;
+    let what;
+    if (phoneCalFresh() || (phoneFresh() && !glassesFresh)) {
+      const cur = phoneCalFresh() && glassesFresh ? norm360(heading.deg + phoneCal.offset) : phone.deg;
+      const adj = indoor.turnAngle(cur, want);
+      phoneTrim = indoor.turnAngle(0, norm360(phoneTrim + adj));
+      phone.deg = norm360(phone.deg + adj); phoneCal.offset = indoor.turnAngle(0, norm360(phoneCal.offset + adj));
+      what = "phone compass";
+    } else if (glassesFresh) {
+      const off = indoor.turnAngle(heading.deg, want);
+      if (s.outdoor) { outCal.errs = [off, off, off]; outCal.offset = off; outCal.n = Math.max(outCal.n, 3); }
+      else { cal.offset = off; cal.errs = [off]; cal.n = Math.max(cal.n, 1); cal.pending = null; cal.lastDoor = null; }
+      what = "glasses compass";
+    } else return { ok: false, error: "No compass reading right now" };
+    if (s.room) s.room.lock = null;
+    console.log(`[compass] aligned by wearer: route ${Math.round(want)}° → ${what} corrected`);
+    if (s.outdoor && lastFix) updateOutdoor(lastFix);
+    return { ok: true, route: Math.round(want), corrected: what };
   }
 
   function indoorOffset() { return phoneCalFresh() ? phoneCal.offset : cal.offset; }
@@ -1564,6 +1598,7 @@ export function createNav({ routesFile, askJSON, broadcast }) {
   const planImageFile = () => (models[0]?.image ? path.join(path.dirname(routesFile), "citytech", models[0].image.file) : null);
 
   return {
+    alignHeading,
     resetCalibration: () => { Object.assign(cal, { offset: 0, n: 0, errs: [], lastDoor: null, lastTs: 0, pending: null }); return { ok: true }; },
     calibration: () => ({ offset: Math.round(cal.offset), samples: cal.n, raw: heading ? Math.round(heading.deg) : null }),
     planInfo, planImageFile,

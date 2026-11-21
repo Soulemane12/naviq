@@ -69,6 +69,7 @@
   .box .status, .box .map { background: var(--bg); }
   .boxh { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; display: flex; justify-content: space-between; gap: 8px; }
   .navb small { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; opacity: .8; }
+  .align { width: 100%; min-height: 50px; margin: 0 0 4px; border-radius: 12px; font-size: 16px; }
   .navb { margin: 0 0 12px; padding: 12px 14px; border-radius: 12px; background: var(--accent); color: #fff; }
   .navb b { display: block; font-size: 22px; letter-spacing: 0.02em; }
   .navb span { font-size: 15px; opacity: 0.92; }
@@ -134,6 +135,7 @@
     </div>
   </div>
 
+  <button class="primary align" id="align" type="button">I’m facing the right way</button>
   <div class="row">
     <button id="stop">Stop trip</button>
     <button id="reset">Reset compass</button>
@@ -398,6 +400,11 @@ const toParam = new URLSearchParams(location.search).get("to");
 if (toParam) { $("q").value = toParam; setTimeout(() => { if (!isIndoor(toParam)) showTab("out", true); search(toParam); }, 300); }
 $("stop").onclick = () => post("/api/naviq/stop").catch(() => {});
 $("reset").onclick = () => post("/api/heading", { reset: true }).catch(() => {});
+// Facing the way you should walk but it says turn? Tap this: that direction becomes "straight".
+$("align").onclick = () => { ensureSensors(); post("/api/heading/align").then((r) => {
+  $("err").textContent = r.ok ? "" : r.error || "Couldn't calibrate";
+  if (r.ok) { $("align").textContent = `Calibrated ✓ (${r.corrected})`; setTimeout(() => ($("align").textContent = "I’m facing the right way"), 2500); }
+}).catch((e) => ($("err").textContent = e.message)); };
 
 // ---------- phone compass → server (iPhone: webkitCompassHeading is magnetic; NYC declination ≈ 12.8° W) ----------
 const DECLINATION = -12.8;
