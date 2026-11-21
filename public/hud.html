@@ -8,7 +8,16 @@
   /* 640x480 = M6 display. Black is see-through on the waveguide, so keep it black.
      Written for the glasses' Chrome 74 WebView: no flex gap, no inset, no optional chaining. */
   :root { --ink: #82ff9a; --dim: #60ce77; }
-  body.white { --ink: #f2f2f2; --dim: #bebebe; }
+  body.white { --ink: #ffffff; --dim: #e8e8e8; }
+  /* On the glasses (white mode): bigger, heavier text reads best on the see-through display. */
+  body.white #nav .top { font-size: 22px; font-weight: 700; }
+  body.white #nav svg { width: 140px; height: 140px; }
+  body.white #nav .instr { font-size: 56px; font-weight: 800; margin-left: 22px; }
+  body.white #nav .detail { font-size: 32px; font-weight: 700; line-height: 1.2; margin-top: 10px; }
+  body.white #nav .status { font-size: 26px; font-weight: 700; }
+  body.white #nav .dest { font-size: 22px; font-weight: 700; }
+  body.white #title { font-size: 60px; font-weight: 800; }
+  body.white .line { font-size: 40px; font-weight: 700; }
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; font-family: ui-monospace, "SF Mono", Menlo, "Droid Sans Mono", monospace; cursor: pointer; }
   #stage { width: 640px; height: 480px; position: relative; box-sizing: border-box; flex: none; color: var(--ink); transform-origin: center; outline: 1px dashed #222; }
