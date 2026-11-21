@@ -74,6 +74,7 @@
 <script>
   var params = new URLSearchParams(location.search);
   var onGlasses = params.get("glasses") === "1";
+  if (onGlasses) document.body.classList.add("white"); // white text reads brighter than green on the M6 display
   if (onGlasses) document.body.classList.add("fs");
   var $ = function (id) { return document.getElementById(id); };
   var stage = $("stage"), cardEl = $("card"), navEl = $("nav");
