@@ -397,7 +397,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       case "GET /api/tts": {
-        const text = (url.searchParams.get("text") ?? "").slice(0, 300);
+        const text = (url.searchParams.get("text") ?? "").trim().slice(0, 300);
         if (!openai || !text) return send(res, 404, { error: "tts needs OPENAI_API_KEY" });
         let mp3 = ttsCache.get(text);
         if (!mp3) {

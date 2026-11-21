@@ -750,18 +750,41 @@ export function createNav({ routesFile, askJSON, broadcast }) {
       leavePlanForOutdoor("Outside (camera)");
       return { read: v, ms, card: s.lastCard, state: state() };
     }
-    const arrive = (detail, statusText, spoken) => {
+    const finalArrive = (detail, statusText, spoken) => {
       entry.result = "arrived"; entry.label = t.label;
       R.done = true; s.done = true; s.endedAt = Date.now();
       s.finalView = { mode: "indoor", arrow: "arrive", instruction: t.kind === "exit" ? "YOU'RE OUT" : "ARRIVED", detail };
       return finish(emit("arrived", statusText, { speak: spoken, navExtra: { phase: "arrived", target: t.label, seen: seenOut } }));
     };
-    if (t.kind === "exit" && v.outdoors) return arrive("Outside", "Out of the building", "You're outside.");
+    // Close to it: keep looking and keep telling them where it is ("Bathrooms on your right"), repeated every
+    // few seconds and following their head, until they stop the trip (or 90 s after they last saw it).
+    const nearView = (detail, statusText, spoken, arrow, b) => {
+      const key = `near|${detail}`;
+      let say = "";
+      if (key !== R.spokenKey || Date.now() - (R.spokenAt ?? 0) > 5000) {
+        // The HUD skips a line identical to the last one it spoke: alternate a trailing space so repeats play.
+        R.nearFlip = !R.nearFlip;
+        say = spoken + (R.nearFlip ? " " : ""); R.spokenKey = key; R.spokenAt = Date.now();
+      }
+      s.roomView = { arrow, instruction: "ARRIVED", detail };
+      return finish(emit("arrived", statusText, {
+        speak: say, phoneDetail: `${statusText}. ${detail}.`,
+        navExtra: { phase: "arrived", target: t.label, seen: seenOut, ...(b != null ? { aheadBearing: Math.round(norm360(b - cal.offset)), aheadBearingTrue: Math.round(b) } : {}) },
+      }));
+    };
+    const arrive = (detail, statusText, spoken, pos = null) => {
+      if (t.kind === "exit") return finalArrive(detail, statusText, spoken);
+      entry.result = "arrived"; entry.label = t.label;
+      const b = pos && h != null ? norm360(h + POS_OFFSET[pos]) : null;
+      R.near = { ts: Date.now(), bearing: b ?? R.near?.bearing ?? null, detail };
+      return nearView(detail, statusText, spoken, pos && pos !== "center" ? pos : "arrive", b);
+    };
+    if (t.kind === "exit" && v.outdoors) return finalArrive("Outside", "Out of the building", "You're outside.");
     let view = null, kind = "ok", phase = "guiding", status = "", bearingOut = null, spoken = "";
 
     // 1) The target itself is in view.
     const roomHit = t.room && v.rooms.map((r) => ({ ...r, p: indoor.parseRoom(r.label) })).find((r) => r.p?.label === t.room.label);
-    if (roomHit?.close) return arrive(`${t.room.label} ${posWords(roomHit.position)}`, `Found ${t.room.label}`, `This is ${t.room.label}, ${posWords(roomHit.position)}.`);
+    if (roomHit?.close) return arrive(`${t.room.label} ${posWords(roomHit.position)}`, `Found ${t.room.label}`, `${t.room.label}, ${posWords(roomHit.position)}.`, roomHit.position);
     if (roomHit) {
       // Readable but still a few doors away: walk to it, don't claim arrival yet.
       const pos = roomHit.position;
@@ -773,12 +796,26 @@ export function createNav({ routesFile, askJSON, broadcast }) {
     if (!view && placeHit) {
       const pos = placeHit.position;
       if (placeHit.close && !(t.kind === "exit" && R.outdoorDest)) {
-        return arrive(`${t.label} ${posWords(pos)}`, `At the ${t.label.toLowerCase()}`, `${t.label}, ${posWords(pos)}.`);
+        return arrive(`${t.label} ${posWords(pos)}`, `At the ${t.label.toLowerCase()}`, `${t.label}, ${posWords(pos)}.`, pos);
       }
       bearingOut = h != null ? norm360(h + POS_OFFSET[pos]) : null;
       view = { arrow: pos === "center" ? "straight" : pos, instruction: `${SHORT_NAME[t.kind]} ${pos === "center" ? "AHEAD" : pos.toUpperCase()}`, detail: short(placeHit.cue || "Walk to it", 40) };
       status = `${t.label} in view`;
       spoken = `${t.label} ${pos === "center" ? "ahead" : `to your ${pos}`}.`;
+    }
+
+    // Already close and it slipped out of view: say where it is from the compass (or repeat the last words).
+    if (!view && R.near) {
+      if (Date.now() - R.near.ts > 90000) return finalArrive(R.near.detail, `Arrived: ${t.label}`, "");
+      let side = null, arrow = "arrive";
+      if (R.near.bearing != null && h != null) {
+        const rel = indoor.turnAngle(h, R.near.bearing);
+        if (Math.abs(rel) <= 30) side = "ahead";
+        else if (Math.abs(rel) >= 135) { side = "behind you"; arrow = "back"; }
+        else { side = rel > 0 ? "on your right" : "on your left"; arrow = rel > 0 ? "right" : "left"; }
+      }
+      const detail = side ? `${t.label} ${side}` : R.near.detail;
+      return nearView(detail, `Near ${t.label}`, `${detail}.`, arrow, R.near.bearing);
     }
 
     // 2) Routed on the real building plan (City Tech Academic Complex).
