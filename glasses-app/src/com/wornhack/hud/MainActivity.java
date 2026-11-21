@@ -50,6 +50,10 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                 | WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        // Full brightness while NAVIQ is up: the system setting drifts down (we found it at 25/255, invisible indoors).
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = 1f;
+        getWindow().setAttributes(lp);
 
         readUrl(getIntent());
 
